@@ -40,6 +40,10 @@ if ($method === 'POST' && $path === '/api/auth/google') {
     }
 
     $pdo = createPdo();
+    $existsStmt = $pdo->prepare('SELECT id FROM users WHERE email = :email LIMIT 1');
+    $existsStmt->execute([':email' => $email]);
+    $isExistingUser = $existsStmt->fetchColumn() !== false;
+
     $stmt = $pdo->prepare(
         'INSERT INTO users (email, first_name, last_name, screen_name)
          VALUES (:email, :first_name, :last_name, :screen_name)
@@ -55,8 +59,9 @@ if ($method === 'POST' && $path === '/api/auth/google') {
         ':screen_name' => (string) $input['screen_name'],
     ]);
 
-    http_response_code(200);
+    http_response_code($isExistingUser ? 200 : 201);
     echo json_encode([
+        'operation' => $isExistingUser ? 'updated' : 'created',
         'email' => $email,
         'first_name' => (string) $firstName,
         'last_name' => (string) $lastName,
@@ -76,7 +81,27 @@ function verifyGoogleToken(string $idToken): ?array
     }
 
     $url = 'https://oauth2.googleapis.com/tokeninfo?id_token=' . rawurlencode($idToken);
-    $response = @file_get_contents($url);
+    $context = stream_context_create(
+        [
+            'http' => [
+                'method' => 'GET',
+                'timeout' => 10,
+            ],
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+            ],
+        ]
+    );
+
+    set_error_handler(static function (): bool {
+        return true;
+    });
+    try {
+        $response = file_get_contents($url, false, $context);
+    } finally {
+        restore_error_handler();
+    }
 
     if ($response === false) {
         return null;
@@ -89,12 +114,17 @@ function verifyGoogleToken(string $idToken): ?array
 
     $audience = $decoded['aud'] ?? null;
     $issuer = $decoded['iss'] ?? null;
+    $expiration = $decoded['exp'] ?? null;
 
     if (!is_string($audience) || !hash_equals($expectedAudience, $audience)) {
         return null;
     }
 
     if (!is_string($issuer) || !in_array($issuer, ['accounts.google.com', 'https://accounts.google.com'], true)) {
+        return null;
+    }
+
+    if (!is_scalar($expiration) || (int) $expiration <= time()) {
         return null;
     }
 
