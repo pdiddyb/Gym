@@ -5,7 +5,7 @@ declare(strict_types=1);
 header('Content-Type: application/json');
 
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+$path = normalizeRequestPath();
 
 if ($method === 'GET' && $path === '/health') {
     http_response_code(200);
@@ -40,21 +40,38 @@ if ($method === 'POST' && $path === '/api/auth/google') {
     }
 
     $pdo = createPdo();
-    $stmt = $pdo->prepare(
-        'INSERT INTO users (email, first_name, last_name, screen_name)
-         VALUES (:email, :first_name, :last_name, :screen_name)
-         ON DUPLICATE KEY UPDATE
-            first_name = VALUES(first_name),
-            last_name = VALUES(last_name),
-            screen_name = VALUES(screen_name)'
-    );
-    $stmt->execute([
+    $operation = 'created';
+    $values = [
         ':email' => $email,
         ':first_name' => (string) $firstName,
         ':last_name' => (string) $lastName,
         ':screen_name' => (string) $input['screen_name'],
-    ]);
-    $operation = $stmt->rowCount() === 1 ? 'created' : 'updated';
+    ];
+
+    try {
+        $insertStmt = $pdo->prepare(
+            'INSERT INTO users (email, first_name, last_name, screen_name)
+             VALUES (:email, :first_name, :last_name, :screen_name)'
+        );
+        $insertStmt->execute($values);
+    } catch (PDOException $exception) {
+        $isDuplicateKey = $exception->getCode() === '23000'
+            && isset($exception->errorInfo[1])
+            && (int) $exception->errorInfo[1] === 1062;
+        if (!$isDuplicateKey) {
+            throw $exception;
+        }
+
+        $updateStmt = $pdo->prepare(
+            'UPDATE users
+             SET first_name = :first_name,
+                 last_name = :last_name,
+                 screen_name = :screen_name
+             WHERE email = :email'
+        );
+        $updateStmt->execute($values);
+        $operation = 'updated';
+    }
 
     http_response_code($operation === 'created' ? 201 : 200);
     echo json_encode([
@@ -145,4 +162,22 @@ function createPdo(): PDO
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ]
     );
+}
+
+function normalizeRequestPath(): string
+{
+    $requestPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+    $scriptDirectory = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+
+    if ($scriptDirectory !== '' && $scriptDirectory !== '.') {
+        if ($requestPath === $scriptDirectory) {
+            return '/';
+        }
+
+        if (str_starts_with($requestPath, $scriptDirectory . '/')) {
+            return substr($requestPath, strlen($scriptDirectory)) ?: '/';
+        }
+    }
+
+    return $requestPath;
 }
