@@ -14,3 +14,4 @@ Environment variables:
 - `DB_NAME` (default `gym`)
 - `DB_USER` (default `root`)
 - `DB_PASSWORD` (default empty)
+- `GOOGLE_CLIENT_ID` (required; used to validate token `aud`)

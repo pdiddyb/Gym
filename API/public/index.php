@@ -70,6 +70,11 @@ echo json_encode(['error' => 'Not found']);
 
 function verifyGoogleToken(string $idToken): ?array
 {
+    $expectedAudience = getenv('GOOGLE_CLIENT_ID') ?: '';
+    if ($expectedAudience === '') {
+        return null;
+    }
+
     $url = 'https://oauth2.googleapis.com/tokeninfo?id_token=' . rawurlencode($idToken);
     $response = @file_get_contents($url);
 
@@ -79,6 +84,17 @@ function verifyGoogleToken(string $idToken): ?array
 
     $decoded = json_decode($response, true);
     if (!is_array($decoded) || !empty($decoded['error_description'])) {
+        return null;
+    }
+
+    $audience = $decoded['aud'] ?? null;
+    $issuer = $decoded['iss'] ?? null;
+
+    if (!is_string($audience) || !hash_equals($expectedAudience, $audience)) {
+        return null;
+    }
+
+    if (!is_string($issuer) || !in_array($issuer, ['accounts.google.com', 'https://accounts.google.com'], true)) {
         return null;
     }
 
