@@ -40,10 +40,6 @@ if ($method === 'POST' && $path === '/api/auth/google') {
     }
 
     $pdo = createPdo();
-    $existsStmt = $pdo->prepare('SELECT id FROM users WHERE email = :email LIMIT 1');
-    $existsStmt->execute([':email' => $email]);
-    $isExistingUser = $existsStmt->fetchColumn() !== false;
-
     $stmt = $pdo->prepare(
         'INSERT INTO users (email, first_name, last_name, screen_name)
          VALUES (:email, :first_name, :last_name, :screen_name)
@@ -58,10 +54,11 @@ if ($method === 'POST' && $path === '/api/auth/google') {
         ':last_name' => (string) $lastName,
         ':screen_name' => (string) $input['screen_name'],
     ]);
+    $operation = $stmt->rowCount() === 1 ? 'created' : 'updated';
 
-    http_response_code($isExistingUser ? 200 : 201);
+    http_response_code($operation === 'created' ? 201 : 200);
     echo json_encode([
-        'operation' => $isExistingUser ? 'updated' : 'created',
+        'operation' => $operation,
         'email' => $email,
         'first_name' => (string) $firstName,
         'last_name' => (string) $lastName,
