@@ -1,6 +1,9 @@
 {
   "name": "Gym",
   "short_name": "Gym",
+  "description": "Log your gym workouts, exercises and sets.",
+  "id": "./",
+  "scope": "./",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#111827",
