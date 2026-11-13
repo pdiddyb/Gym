@@ -1,0 +1,14 @@
+# Send plain-HTTP visitors to HTTPS (service workers and install need it).
+RewriteEngine On
+RewriteCond %{HTTPS} !=on
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# Serve the manifest with the proper type.
+AddType application/manifest+json .webmanifest
+
+# Always re-check the service worker so app updates reach installed phones.
+<IfModule mod_headers.c>
+  <FilesMatch "^service-worker\.js$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
