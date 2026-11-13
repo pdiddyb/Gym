@@ -134,6 +134,19 @@ label input {
   white-space: nowrap;
 }
 
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.backup p {
+  margin: 0 0 12px;
+}
+
+.backup .status {
+  margin: 12px 0 0;
+}
+
 .btn.small {
   min-height: 36px;
   padding: 4px 12px;
