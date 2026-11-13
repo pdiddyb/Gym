@@ -14,7 +14,7 @@ async function withStore(mode, action) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction('workouts', mode);
     const request = action(tx.objectStore('workouts'));
-    tx.oncomplete = () => resolve(request.result);
+    tx.oncomplete = () => resolve(request?.result);
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);
   });
@@ -24,6 +24,78 @@ const listWorkouts = () => withStore('readonly', (store) => store.getAll());
 const getWorkout = (id) => withStore('readonly', (store) => store.get(id));
 const saveWorkout = (workout) => withStore('readwrite', (store) => store.put(workout));
 const deleteWorkout = (id) => withStore('readwrite', (store) => store.delete(id));
+const saveWorkouts = (workouts) =>
+  withStore('readwrite', (store) => {
+    workouts.forEach((workout) => store.put(workout));
+  });
+
+// Ask the browser not to evict this site's data when the device runs low on space.
+navigator.storage?.persist?.().catch(() => {});
+
+// ---------- Backup: export to / import from a JSON file ----------
+
+const BACKUP_FORMAT = 'gym-workouts';
+
+async function exportWorkouts() {
+  const backup = {
+    format: BACKUP_FORMAT,
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    workouts: await listWorkouts(),
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
+  const link = h('a', { href: url, download: `gym-workouts-${backup.exportedAt.slice(0, 10)}.json` });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return backup.workouts.length;
+}
+
+// Returns clean workout objects, or throws if the file isn't a backup.
+function parseBackup(text) {
+  const data = JSON.parse(text);
+  const items = Array.isArray(data) ? data : data?.workouts;
+  if (!Array.isArray(items)) {
+    throw new Error('No workouts list in file');
+  }
+
+  const text60 = (value) => String(value).trim().slice(0, 60);
+  const timestamp = (value) => (Number.isFinite(value) && value > 0 ? value : null);
+
+  return items.map((item) => {
+    if (!item || typeof item.id !== 'string' || !item.id || typeof item.name !== 'string' || !text60(item.name)) {
+      throw new Error('Workout is missing an id or name');
+    }
+    const exercises = Array.isArray(item.exercises) ? item.exercises : [];
+    return {
+      id: item.id,
+      name: text60(item.name),
+      startedAt: timestamp(item.startedAt) ?? Date.now(),
+      finishedAt: timestamp(item.finishedAt),
+      exercises: exercises
+        .filter((exercise) => exercise && typeof exercise.name === 'string' && text60(exercise.name))
+        .map((exercise) => ({
+          id: typeof exercise.id === 'string' && exercise.id ? exercise.id : newId(),
+          name: text60(exercise.name),
+          sets: (Array.isArray(exercise.sets) ? exercise.sets : [])
+            .filter((set) => set && Number.isFinite(set.reps) && set.reps >= 1)
+            .map((set) => ({
+              id: typeof set.id === 'string' && set.id ? set.id : newId(),
+              weight: Number.isFinite(set.weight) && set.weight > 0 ? set.weight : 0,
+              reps: Math.floor(set.reps),
+            })),
+        })),
+    };
+  });
+}
+
+// Merges the file into what's already here: same id is replaced, everything else is kept.
+async function importWorkouts(file) {
+  const workouts = parseBackup(await file.text());
+  await saveWorkouts(workouts);
+  return workouts.length;
+}
 
 function newId() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -72,8 +144,55 @@ function summary(workout) {
 
 // ---------- Home: start a workout, see past ones ----------
 
-function renderHome(workouts) {
+function renderHome(workouts, backupMessage) {
   workouts.sort((a, b) => b.startedAt - a.startedAt);
+
+  const fileInput = h('input', {
+    type: 'file',
+    accept: 'application/json,.json',
+    hidden: true,
+    onchange: async () => {
+      const file = fileInput.files[0];
+      if (!file) {
+        return;
+      }
+      let message;
+      try {
+        message = { text: `Imported ${plural(await importWorkouts(file), 'workout')}.` };
+      } catch (error) {
+        console.error(error);
+        message = { text: "Couldn't import that file. It doesn't look like a Gym export.", error: true };
+      }
+      renderHome(await listWorkouts(), message);
+    },
+  });
+
+  const backup = h(
+    'div',
+    { class: 'card backup' },
+    h('p', { class: 'muted' }, 'Workouts are stored only on this device. Export a file to keep a copy or move them.'),
+    h(
+      'div',
+      { class: 'row' },
+      h(
+        'button',
+        {
+          class: 'btn secondary grow export',
+          type: 'button',
+          disabled: workouts.length === 0,
+          onclick: async () => {
+            const count = await exportWorkouts();
+            renderHome(await listWorkouts(), { text: `Exported ${plural(count, 'workout')}.` });
+          },
+        },
+        'Export'
+      ),
+      h('button', { class: 'btn secondary grow import', type: 'button', onclick: () => fileInput.click() }, 'Import'),
+      fileInput
+    ),
+    backupMessage &&
+      h('p', { class: backupMessage.error ? 'error status' : 'muted status', role: 'status' }, backupMessage.text)
+  );
 
   const nameInput = h('input', {
     name: 'name',
@@ -118,7 +237,14 @@ function renderHome(workouts) {
       )
     : h('p', { class: 'muted' }, 'No workouts yet. Name one above to start logging.');
 
-  view.replaceChildren(h('h2', {}, 'New workout'), form, h('h2', {}, 'History'), ...[list].flat());
+  view.replaceChildren(
+    h('h2', {}, 'New workout'),
+    form,
+    h('h2', {}, 'History'),
+    ...[list].flat(),
+    h('h2', {}, 'Backup'),
+    backup
+  );
 }
 
 // ---------- Workout: exercises and sets ----------
