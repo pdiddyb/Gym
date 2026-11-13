@@ -1,5 +1,14 @@
-const CACHE_NAME = 'gym-pwa-v1';
-const ASSETS = ['./', './index.html', './app.js', './manifest.webmanifest'];
+const CACHE_NAME = 'gym-pwa-v2';
+const ASSETS = [
+  './',
+  './index.html',
+  './styles.css',
+  './app.js',
+  './manifest.webmanifest',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
+  './icons/icon.svg',
+];
 const PRECACHE_PATHS = new Set(ASSETS.map((asset) => new URL(asset, self.location.origin).pathname));
 
 self.addEventListener('install', (event) => {
@@ -8,7 +17,12 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches
+      .keys()
+      .then((names) => Promise.all(names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))))
+      .then(() => self.clients.claim())
+  );
 });
 
 self.addEventListener('fetch', (event) => {
