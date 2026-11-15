@@ -219,6 +219,25 @@ function deleteOutline(id) {
   fb.deleteOutline(user.uid, id).catch(reportSaveError);
 }
 
+// Returns a clean outline object, or null if the input isn't one.
+function cleanOutline(item) {
+  const name = typeof item?.name === 'string' ? item.name.trim().slice(0, 60) : '';
+  if (!name || typeof item.id !== 'string' || !/^[\w-]{1,128}$/.test(item.id)) {
+    return null;
+  }
+  return {
+    id: item.id,
+    name,
+    createdAt: Number.isFinite(item.createdAt) && item.createdAt > 0 ? item.createdAt : 0,
+    exercises: (Array.isArray(item.exercises) ? item.exercises : [])
+      .filter((exercise) => exercise && typeof exercise.name === 'string' && exercise.name.trim())
+      .map((exercise) => ({
+        name: exercise.name.trim().slice(0, 60),
+        sets: Number.isInteger(exercise.sets) && exercise.sets > 0 ? exercise.sets : 0,
+      })),
+  };
+}
+
 // ---------- Exercise library ----------
 //
 // users/{uid}/exercises has one entry for each exercise that is in any of the user's
@@ -1630,10 +1649,16 @@ function renderDone(workout, outlineState) {
 
 const BACKUP_FORMAT = 'gym-workouts';
 
+const backupCounts = ({ workouts: workoutCount, outlines: outlineCount }) =>
+  outlineCount ? `${plural(workoutCount, 'workout')} and ${plural(outlineCount, 'outline')}` : plural(workoutCount, 'workout');
+
+// Downloads the backup file and returns how many workouts and outlines are in it.
 function exportWorkouts() {
   const backup = {
     format: BACKUP_FORMAT,
-    version: 2, // 2 adds a unit on every set, and the unit setting. Version 1 files were all kg.
+    // 2 adds a unit on every set, and the unit setting. Version 1 files were all kg.
+    // 3 adds the outlines.
+    version: 3,
     exportedAt: new Date().toISOString(),
     settings: { unit: settings.unit },
     workouts: [...workouts.values()].map((workout) => ({
@@ -1643,6 +1668,7 @@ function exportWorkouts() {
         sets: exercise.sets.map((set) => ({ ...set, unit: unitOf(set) })),
       })),
     })),
+    outlines: [...outlines.values()],
   };
   const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
   const link = h('a', { href: url, download: `gym-workouts-${backup.exportedAt.slice(0, 10)}.json` });
@@ -1650,24 +1676,30 @@ function exportWorkouts() {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  return backup.workouts.length;
+  return { workouts: backup.workouts.length, outlines: backup.outlines.length };
 }
 
-// Returns clean workout objects, or throws if the file isn't a backup.
+// Returns clean workouts and outlines, or throws if the file isn't a backup. Files from
+// before outlines were backed up have none; an outline that can't be read is skipped.
 function parseBackup(text) {
   const data = JSON.parse(text);
   const items = Array.isArray(data) ? data : data?.workouts;
   if (!Array.isArray(items)) {
     throw new Error('No workouts list in file');
   }
-  return items.map(cleanWorkout);
+  return {
+    workouts: items.map(cleanWorkout),
+    outlines: (Array.isArray(data?.outlines) ? data.outlines : []).map(cleanOutline).filter(Boolean),
+  };
 }
 
-// Merges the file into the account: a workout with the same id is replaced, the rest are kept.
+// Merges the file into the account: a workout or outline with the same id is replaced, the
+// rest are kept. Returns how many of each were in the file.
 async function importWorkouts(file) {
-  const list = parseBackup(await file.text());
-  saveWorkouts(list);
-  return list.length;
+  const backup = parseBackup(await file.text());
+  saveWorkouts(backup.workouts);
+  backup.outlines.forEach(saveOutline);
+  return { workouts: backup.workouts.length, outlines: backup.outlines.length };
 }
 
 // One saved outline on the Settings screen: its name in a box to rename it, and a delete button.
@@ -1734,7 +1766,7 @@ function renderSettings(backupMessage, outlineMessage) {
         return;
       }
       try {
-        renderSettings({ text: `Imported ${plural(await importWorkouts(file), 'workout')}.` });
+        renderSettings({ text: `Imported ${backupCounts(await importWorkouts(file))}.` });
       } catch (error) {
         console.error(error);
         renderSettings({ text: "Couldn't import that file. It doesn't look like a Gym export.", error: true });
@@ -1783,7 +1815,7 @@ function renderSettings(backupMessage, outlineMessage) {
     h(
       'div',
       { class: 'card backup' },
-      h('p', { class: 'muted' }, 'Download a copy of all your workouts as a file, or load one back in.'),
+      h('p', { class: 'muted' }, 'Download a copy of all your workouts and outlines as a file, or load one back in.'),
       h(
         'div',
         { class: 'row' },
@@ -1792,8 +1824,8 @@ function renderSettings(backupMessage, outlineMessage) {
           {
             class: 'btn secondary grow export',
             type: 'button',
-            disabled: workouts.size === 0,
-            onclick: () => renderSettings({ text: `Exported ${plural(exportWorkouts(), 'workout')}.` }),
+            disabled: workouts.size === 0 && outlines.size === 0,
+            onclick: () => renderSettings({ text: `Exported ${backupCounts(exportWorkouts())}.` }),
           },
           'Export'
         ),
@@ -1942,24 +1974,12 @@ function onUserChanged(nextUser) {
     libraryLoaded([]); // the app still works without suggestions
   });
   const outlinesLoaded = (list) => {
-    outlines = new Map();
-    for (const item of list) {
-      const name = typeof item.name === 'string' ? item.name.trim() : '';
-      if (!name) {
-        continue;
-      }
-      outlines.set(item.id, {
-        id: item.id,
-        name,
-        createdAt: item.createdAt || 0,
-        exercises: (Array.isArray(item.exercises) ? item.exercises : [])
-          .filter((exercise) => exercise && typeof exercise.name === 'string' && exercise.name.trim())
-          .map((exercise) => ({
-            name: exercise.name.trim(),
-            sets: Number.isInteger(exercise.sets) && exercise.sets > 0 ? exercise.sets : 0,
-          })),
-      });
-    }
+    outlines = new Map(
+      list
+        .map(cleanOutline)
+        .filter(Boolean)
+        .map((outline) => [outline.id, outline])
+    );
     const first = !outlinesReady;
     outlinesReady = true;
     if (first || onListScreen()) {
