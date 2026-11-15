@@ -358,6 +358,113 @@ a.btn {
   min-width: 0;
 }
 
+/* In-app number pad for the weight and reps fields */
+
+#keypad {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  /* Clears the home bar, and the notch side in landscape. */
+  padding: 8px max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom))
+    max(8px, env(safe-area-inset-left));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  /* Closed: slid off the bottom, and out of reach of Tab and screen readers. */
+  transform: translateY(100%);
+  visibility: hidden;
+  transition: transform 0.18s ease, visibility 0s linear 0.18s;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#keypad.open {
+  transform: none;
+  visibility: visible;
+  transition: transform 0.18s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #keypad,
+  #keypad.open {
+    transition: none;
+  }
+}
+
+.pad-keys {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  max-width: 528px;
+  margin: 0 auto;
+}
+
+.pad-key {
+  min-height: 56px;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font: inherit;
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.pad-key:active {
+  background: var(--border);
+}
+
+.pad-key:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.pad-action {
+  grid-column: 1 / -1;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.pad-action:active {
+  background: var(--accent);
+  filter: brightness(0.9);
+}
+
+/* Short, wide screens (a phone on its side): put the action key in a fourth column so the
+   pad is four rows tall instead of five. */
+@media (orientation: landscape) and (max-height: 520px) {
+  .pad-keys {
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .pad-action {
+    grid-column: 4;
+    grid-row: 1 / span 4;
+  }
+
+  /* There isn't room for a pinned header, the field and the pad; let the header scroll. */
+  body.pad-open .bar {
+    position: static;
+  }
+}
+
+/* The field the pad is typing into. */
+input.pad-active {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* While the pad is up, leave room so the last fields can scroll above it. */
+body.pad-open main {
+  padding-bottom: calc(var(--pad-height, 320px) + 24px);
+}
+
 .actions {
   display: grid;
   gap: 8px;

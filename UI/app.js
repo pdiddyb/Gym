@@ -396,56 +396,243 @@ function renderHome() {
   }
 }
 
+// ---------- In-app number pad (replaces the phone keyboard for weight and reps) ----------
+//
+// The weight and reps fields have inputmode="none", so the phone's own keyboard never opens.
+// They are still ordinary focusable text fields: a physical keyboard types into them as
+// usual, and the pad below just edits the value of whichever one is active.
+
+let padField = null; // the field the pad is editing, or null when the pad is closed
+let padFresh = false; // true until the first key: the next digit replaces the pre-filled value
+let padSuppressed = false; // set while focusing a field from code without opening the pad
+
+const padKey = (label, key, attrs = {}) =>
+  h('button', { type: 'button', class: 'pad-key', 'data-key': key, ...attrs }, label);
+const padPoint = padKey('.', '.', { 'aria-label': 'Decimal point' });
+const padAction = padKey('Next', 'action', { class: 'pad-key pad-action' });
+const pad = h(
+  'div',
+  { id: 'keypad', role: 'group', 'aria-label': 'Number pad' },
+  h(
+    'div',
+    { class: 'pad-keys' },
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => padKey(digit, digit)),
+    padPoint,
+    padKey('0', '0'),
+    padKey('⌫', 'back', { 'aria-label': 'Backspace' }),
+    padAction
+  )
+);
+document.body.append(pad);
+
+const isPadField = (element) => element instanceof HTMLInputElement && element.hasAttribute('data-pad');
+
+// Scrolls just enough that the field sits between the header and the pad.
+function revealPadField(field) {
+  const rect = field.getBoundingClientRect();
+  // The header may have scrolled away (it stops sticking on short landscape screens).
+  const headerBottom = Math.max(0, document.querySelector('.bar')?.getBoundingClientRect().bottom ?? 0);
+  const lowest = window.innerHeight - pad.offsetHeight - 12;
+  if (rect.bottom > lowest) {
+    window.scrollBy(0, rect.bottom - lowest);
+  } else if (rect.top < headerBottom + 8) {
+    window.scrollBy(0, rect.top - headerBottom - 8);
+  }
+}
+
+function openPad(field) {
+  padField?.classList.remove('pad-active');
+  padField = field;
+  padFresh = true;
+  field.classList.add('pad-active');
+
+  const isWeight = field.name === 'weight';
+  padPoint.disabled = !isWeight;
+  padAction.textContent = isWeight ? 'Next' : 'Add set';
+
+  pad.classList.add('open');
+  // Room at the bottom of the page so the last fields can scroll clear of the pad.
+  document.body.style.setProperty('--pad-height', `${pad.offsetHeight}px`);
+  document.body.classList.add('pad-open');
+
+  if (document.activeElement !== field) {
+    field.focus({ preventScroll: true });
+  }
+  field.select(); // shows that the next digit replaces the whole value
+  revealPadField(field);
+}
+
+function closePad() {
+  padField?.classList.remove('pad-active');
+  padField = null;
+  pad.classList.remove('open');
+  document.body.classList.remove('pad-open');
+}
+
+function focusWithoutPad(field) {
+  padSuppressed = true;
+  field.focus();
+  padSuppressed = false;
+}
+
+function pressPadKey(key) {
+  const field = padField;
+  if (!field?.isConnected) {
+    closePad();
+    return;
+  }
+  const isWeight = field.name === 'weight';
+
+  if (key === 'action') {
+    if (isWeight) {
+      openPad(field.form.elements.reps);
+    } else {
+      field.form.requestSubmit(); // same as pressing the form's own "Add set"
+    }
+    return;
+  }
+
+  let text;
+  if (key === 'back') {
+    text = field.value.slice(0, -1);
+  } else {
+    text = padFresh ? '' : field.value;
+    if (key === '.') {
+      if (!isWeight || text.includes('.')) {
+        return;
+      }
+      text = `${text || '0'}.`;
+    } else {
+      text = text === '0' ? key : text + key;
+    }
+    const [whole, decimals = ''] = text.split('.');
+    if (whole.length > (isWeight ? 4 : 3) || decimals.length > 2) {
+      return;
+    }
+  }
+
+  padFresh = false;
+  field.value = text;
+  // Tapping a key can take focus on some browsers; put the caret back at the end.
+  field.focus({ preventScroll: true });
+  field.setSelectionRange(text.length, text.length);
+}
+
+pad.addEventListener('mousedown', (event) => event.preventDefault()); // keep focus in the field
+pad.addEventListener('click', (event) => {
+  const key = event.target.closest?.('.pad-key');
+  if (key && !key.disabled) {
+    pressPadKey(key.dataset.key);
+  }
+});
+
+// Tapping anywhere that isn't the pad or one of its fields closes it.
+document.addEventListener(
+  'pointerdown',
+  (event) => {
+    if (!padField || pad.contains(event.target) || isPadField(event.target)) {
+      return;
+    }
+    const field = padField;
+    closePad();
+    field.blur();
+  },
+  true
+);
+// So does moving focus somewhere else (for example with Tab), or pressing Escape.
+document.addEventListener('focusin', (event) => {
+  if (padField && !pad.contains(event.target) && !isPadField(event.target)) {
+    closePad();
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && padField) {
+    closePad();
+  }
+});
+
+// A weight or reps field wired to the pad. `allowed` strips anything a physical keyboard
+// (or paste) puts in that isn't part of a number.
+function padInput(attrs, allowed) {
+  const input = h('input', {
+    type: 'text',
+    inputmode: 'none',
+    autocomplete: 'off',
+    'data-pad': true,
+    ...attrs,
+    onfocus: () => {
+      if (!padSuppressed && padField !== input) {
+        openPad(input);
+      }
+    },
+    // A tap on a field that already has focus (pad closed), or the tap that follows the
+    // focus above and would otherwise drop the selection.
+    onclick: () => {
+      if (padField !== input) {
+        openPad(input);
+      } else if (padFresh) {
+        input.select();
+      }
+    },
+    oninput: () => {
+      const cleaned = allowed(input.value.replace(',', '.'));
+      if (cleaned !== input.value) {
+        input.value = cleaned;
+      }
+      if (padField === input) {
+        padFresh = false;
+      }
+    },
+  });
+  return input;
+}
+
+const weightText = (value) => {
+  const [whole, ...rest] = value.replace(/[^0-9.]/g, '').split('.');
+  return rest.length ? `${whole}.${rest.join('')}` : whole;
+};
+const repsText = (value) => value.replace(/[^0-9]/g, '');
+
 // ---------- Workout: exercises and sets ----------
 
-function renderWorkout(workout, focusSelector) {
-  const commit = (nextFocus) => {
+function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
+  closePad();
+  const commit = (nextFocus, withPad = false) => {
     saveWorkout(workout);
-    renderWorkout(workout, nextFocus);
+    renderWorkout(workout, nextFocus, withPad);
   };
 
   const exerciseCards = workout.exercises.map((exercise) => {
     const last = exercise.sets[exercise.sets.length - 1];
-    const weightInput = h('input', {
-      name: 'weight',
-      type: 'number',
-      inputmode: 'decimal',
-      enterkeyhint: 'next',
-      min: '0',
-      step: 'any',
-      placeholder: '0',
-      value: last ? String(last.weight) : null,
-      // Enter moves on to reps instead of adding the set.
-      onkeydown: (event) => {
-        if (event.key === 'Enter') {
-          event.preventDefault();
-          goToReps();
-        }
+    const weightInput = padInput(
+      {
+        name: 'weight',
+        enterkeyhint: 'next',
+        pattern: '[0-9]*[.]?[0-9]*',
+        title: 'A number, for example 62.5',
+        placeholder: '0',
+        value: last ? String(last.weight) : null,
+        // Enter moves on to reps instead of adding the set.
+        onkeydown: (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            openPad(repsInput);
+          }
+        },
       },
-      // The phone keypads have no Enter key; their Done button just closes the keyboard,
-      // which arrives here as losing focus to nothing. Treat that like Enter. Tapping
-      // another field or button (relatedTarget set) is left alone, as is switching apps.
-      onblur: (event) => {
-        if (weightInput.value !== '' && !event.relatedTarget && document.hasFocus() && repsInput.isConnected) {
-          goToReps();
-        }
+      weightText
+    );
+    const repsInput = padInput(
+      {
+        name: 'reps',
+        enterkeyhint: 'done',
+        pattern: '0*[1-9][0-9]*',
+        title: 'A whole number, 1 or more',
+        required: true,
+        value: last ? String(last.reps) : null,
       },
-    });
-    // Focus reps with its text selected, so typing replaces the pre-filled value.
-    const goToReps = () => {
-      repsInput.focus();
-      repsInput.select();
-    };
-    const repsInput = h('input', {
-      name: 'reps',
-      type: 'number',
-      inputmode: 'numeric',
-      enterkeyhint: 'done',
-      min: '1',
-      step: '1',
-      required: true,
-      value: last ? String(last.reps) : null,
-    });
+      repsText
+    );
 
     return h(
       'section',
@@ -541,7 +728,7 @@ function renderWorkout(workout, focusSelector) {
         }
         const exercise = { id: newId(), name, sets: [] };
         workout.exercises.push(exercise);
-        commit(`.exercise[data-id="${exercise.id}"] input[name="weight"]`);
+        commit(`.exercise[data-id="${exercise.id}"] input[name="weight"]`, true);
       },
     },
     h(
@@ -597,8 +784,13 @@ function renderWorkout(workout, focusSelector) {
     )
   );
 
-  if (focusSelector) {
-    view.querySelector(focusSelector)?.focus();
+  // After adding an exercise the pad opens on its weight field; after adding a set the
+  // reps field keeps focus but the pad stays closed until it is tapped.
+  const focusTarget = focusSelector && view.querySelector(focusSelector);
+  if (focusTarget && (openPadOnFocus || !isPadField(focusTarget))) {
+    focusTarget.focus();
+  } else if (focusTarget) {
+    focusWithoutPad(focusTarget);
   }
 }
 
@@ -706,6 +898,7 @@ function renderSettings(backupMessage) {
 const onHomeScreen = () => location.hash !== '#/settings' && !location.hash.startsWith('#/workout/');
 
 function route() {
+  closePad();
   if (!fb) {
     return;
   }
