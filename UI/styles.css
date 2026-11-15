@@ -1,13 +1,20 @@
+/* Black-and-white theme. Contrast against the backgrounds below (WCAG AA needs 4.5:1 for
+   text and 3:1 for the edges of controls):
+     --text    #ffffff  on --bg 19.8:1, on --surface 18.1:1, on --surface-2 15.5:1
+     --muted   #a8a8a8  on --bg  8.3:1, on --surface  7.6:1, on --surface-2  6.5:1
+     --control #767676  on --bg  4.4:1, on --surface  4.0:1, on --surface-2  3.4:1  (field edges)
+     --danger  #ff6b6b  on --bg  7.1:1, on --surface  6.5:1           (destructive actions only) */
 :root {
-  --bg: #111827;
-  --surface: #1f2937;
-  --surface-2: #273449;
-  --border: #374151;
-  --text: #f3f4f6;
-  --muted: #9ca3af;
-  --accent: #34d399;
-  --accent-text: #052e1f;
-  --danger: #f87171;
+  --bg: #0a0a0a;
+  --surface: #161616;
+  --surface-2: #242424;
+  --border: #333333;
+  --control: #767676;
+  --text: #ffffff;
+  --muted: #a8a8a8;
+  --accent: #ffffff;
+  --accent-text: #0a0a0a;
+  --danger: #ff6b6b;
   color-scheme: dark;
 }
 
@@ -136,7 +143,7 @@ input {
   padding: 8px 12px;
   background: var(--bg);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control);
   border-radius: 8px;
 }
 
@@ -199,9 +206,92 @@ a.btn {
   text-decoration: none;
 }
 
-#header-actions,
-#auth {
+#header-actions {
   gap: 8px;
+}
+
+#auth {
+  gap: 4px;
+}
+
+/* Icons inside buttons and links */
+.icon {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+/* Profile picture button and its menu */
+.account {
+  position: relative;
+  display: flex;
+}
+
+.avatar-btn {
+  width: 44px;
+  height: 44px;
+  padding: 4px;
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  overflow: hidden;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--control);
+  border-radius: 50%;
+  font-weight: 600;
+}
+
+.avatar img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.account-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  min-width: 200px;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--control);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.account-menu[hidden] {
+  display: none;
+}
+
+.account-menu strong,
+.account-menu .muted {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.account-menu .btn {
+  margin-top: 12px;
 }
 
 #notice {
@@ -225,7 +315,8 @@ a.btn {
 }
 
 #notice.error {
-  border-color: var(--danger);
+  border-color: var(--text);
+  font-weight: 600;
 }
 
 @media (max-width: 560px) {
@@ -260,32 +351,42 @@ a.btn {
   border: 1px solid var(--border);
 }
 
+/* Destructive actions are the only place the danger colour is used. */
 .btn.danger {
   background: transparent;
   color: var(--danger);
-  border: 1px solid var(--border);
+  border: 1px solid var(--danger);
 }
 
 .btn.block {
   width: 100%;
 }
 
+/* Icon-only buttons and links: 44px touch target, and each has an aria-label. */
 .icon-btn {
-  width: 36px;
-  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
   flex: none;
   background: transparent;
   color: var(--muted);
   border: 0;
   border-radius: 8px;
-  font-size: 1.2rem;
+  font-size: 1.3rem;
   line-height: 1;
+  text-decoration: none;
   cursor: pointer;
 }
 
 .icon-btn:hover {
-  color: var(--danger);
+  color: var(--text);
   background: var(--surface-2);
+}
+
+.icon-btn.destructive:hover {
+  color: var(--danger);
 }
 
 .back {
@@ -295,7 +396,12 @@ a.btn {
   text-decoration: none;
 }
 
-/* Home */
+/* Home and History */
+
+h1 + .workout-link,
+h1 + p {
+  margin-top: 12px;
+}
 
 .workout-link {
   display: block;
@@ -313,8 +419,8 @@ a.btn {
   flex: none;
   padding: 2px 8px;
   border-radius: 999px;
-  background: var(--accent);
-  color: var(--accent-text);
+  border: 1px solid var(--text);
+  color: var(--text);
   font-size: 0.75rem;
   font-weight: 600;
 }
@@ -409,6 +515,9 @@ a.btn {
 }
 
 .pad-key {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-height: 56px;
   background: var(--surface-2);
   color: var(--text);
@@ -429,8 +538,9 @@ a.btn {
   cursor: default;
 }
 
+/* Bottom row: "Hide keypad" in the first column, the action key across the other two. */
 .pad-action {
-  grid-column: 1 / -1;
+  grid-column: 2 / -1;
   background: var(--accent);
   color: var(--accent-text);
   border: 0;
@@ -452,7 +562,12 @@ a.btn {
 
   .pad-action {
     grid-column: 4;
-    grid-row: 1 / span 4;
+    grid-row: 1 / span 3;
+  }
+
+  .pad-hide {
+    grid-column: 4;
+    grid-row: 4;
   }
 
   /* There isn't room for a pinned header, the field and the pad; let the header scroll. */
@@ -470,8 +585,7 @@ input.pad-active {
 
 /* "Add set" was pressed with nothing usable in the field. */
 input.pad-invalid {
-  border-color: var(--danger);
-  outline-color: var(--danger);
+  outline-style: dashed;
 }
 
 /* While the pad is up, leave room so the last fields can scroll above it. */
@@ -485,6 +599,10 @@ body.pad-open main {
   margin-top: 24px;
 }
 
+/* Problems are shown in bold white with a bar, not in the danger colour. */
 .error {
-  color: var(--danger);
+  padding-left: 10px;
+  border-left: 3px solid var(--text);
+  color: var(--text);
+  font-weight: 600;
 }
