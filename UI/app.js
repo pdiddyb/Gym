@@ -14,6 +14,8 @@ let settings = { ...DEFAULT_SETTINGS };
 let settingsReady = false;
 let library = new Map(); // exercise key -> library entry, kept current by a Firestore listener
 let libraryReady = false;
+let outlines = new Map(); // id -> outline, kept current by a Firestore listener
+let outlinesReady = false;
 let stopWatching = null;
 let signInError = null;
 let localCount = 0; // workouts still in this device's old IndexedDB store
@@ -82,6 +84,35 @@ function formatDate(timestamp) {
     year: 'numeric',
   });
 }
+
+function formatDateTime(timestamp) {
+  return `${formatDate(timestamp)}, ${new Date(timestamp).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+}
+
+// Workouts are known by when they started. Ones made while workouts still had titles keep
+// showing their title.
+const workoutLabel = (workout) => workout.name || formatDateTime(workout.startedAt);
+
+// A running clock: "12:34", or "1:02:03" from an hour up.
+function formatClock(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const two = (value) => String(value).padStart(2, '0');
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours ? `${hours}:${two(minutes)}:${two(seconds % 60)}` : `${minutes}:${two(seconds % 60)}`;
+}
+
+// A length of time in words: "45 min", "1 h 12 min", or "40 sec" under a minute.
+function formatDuration(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) {
+    return `${seconds} sec`;
+  }
+  const minutes = Math.round(seconds / 60);
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+const workoutDuration = (workout) => formatDuration(workout.finishedAt - workout.startedAt);
 
 // ---------- Weight units ----------
 //
@@ -176,6 +207,18 @@ function saveWorkouts(list) {
   syncLibrary(touched);
 }
 
+// Outlines: users/{uid}/outlines/{id} is { name, createdAt, exercises: [{ name, sets }] },
+// where `sets` is how many sets the exercise had. No weights or reps are kept.
+function saveOutline(outline) {
+  outlines.set(outline.id, outline);
+  fb.saveOutline(user.uid, outline).catch(reportSaveError);
+}
+
+function deleteOutline(id) {
+  outlines.delete(id);
+  fb.deleteOutline(user.uid, id).catch(reportSaveError);
+}
+
 // ---------- Exercise library ----------
 //
 // users/{uid}/exercises has one entry for each exercise that is in any of the user's
@@ -198,6 +241,10 @@ const exerciseDocId = (key) => `e_${key.replace(/[^a-z0-9]/g, (char) => `_${char
 const exerciseNames = (workout) => (Array.isArray(workout?.exercises) ? workout.exercises : []).map((exercise) => exercise?.name);
 
 const setInKg = (set) => convertWeight(set.weight, unitOf(set), 'kg');
+
+// Whether set `a` is better than set `b`: heavier, or more reps at the same weight.
+// Anything beats no set at all.
+const beats = (a, b) => !b || setInKg(a) > setInKg(b) || (setInKg(a) === setInKg(b) && a.reps > b.reps);
 
 // Reads the given workouts and returns key -> { name, lastUsedAt, last, max } for every
 // exercise in them, or only for the keys in `wanted`.
@@ -226,8 +273,7 @@ function deriveLibrary(list, wanted = null) {
         const record = { weight: set.weight, unit: unitOf(set), reps: set.reps, date };
         entry.last = record;
         // Heaviest wins; at the same weight, more reps wins; a tie keeps the earlier set.
-        const heavier = !entry.max || setInKg(record) > setInKg(entry.max);
-        if (heavier || (setInKg(record) === setInKg(entry.max) && record.reps > entry.max.reps)) {
+        if (beats(record, entry.max)) {
           entry.max = record;
         }
       }
@@ -315,30 +361,38 @@ function cleanWorkout(item) {
   if (!item || typeof item.id !== 'string' || !/^[\w-]{1,128}$/.test(item.id)) {
     throw new Error('Workout is missing a usable id');
   }
-  if (typeof item.name !== 'string' || !text60(item.name)) {
-    throw new Error('Workout is missing a name');
-  }
   const exercises = Array.isArray(item.exercises) ? item.exercises : [];
-  return {
+  const workout = {
     id: item.id,
-    name: text60(item.name),
     startedAt: timestamp(item.startedAt) ?? Date.now(),
     finishedAt: timestamp(item.finishedAt),
     exercises: exercises
       .filter((exercise) => exercise && typeof exercise.name === 'string' && text60(exercise.name))
-      .map((exercise) => ({
-        id: typeof exercise.id === 'string' && exercise.id ? exercise.id : newId(),
-        name: text60(exercise.name),
-        sets: (Array.isArray(exercise.sets) ? exercise.sets : [])
-          .filter((set) => set && Number.isFinite(set.reps) && set.reps >= 1)
-          .map((set) => ({
-            id: typeof set.id === 'string' && set.id ? set.id : newId(),
-            weight: Number.isFinite(set.weight) && set.weight > 0 ? set.weight : 0,
-            unit: unitOf(set), // no unit (older data and backups) means kg
-            reps: Math.floor(set.reps),
-          })),
-      })),
+      .map((exercise) => {
+        const cleaned = {
+          id: typeof exercise.id === 'string' && exercise.id ? exercise.id : newId(),
+          name: text60(exercise.name),
+          sets: (Array.isArray(exercise.sets) ? exercise.sets : [])
+            .filter((set) => set && Number.isFinite(set.reps) && set.reps >= 1)
+            .map((set) => ({
+              id: typeof set.id === 'string' && set.id ? set.id : newId(),
+              weight: Number.isFinite(set.weight) && set.weight > 0 ? set.weight : 0,
+              unit: unitOf(set), // no unit (older data and backups) means kg
+              reps: Math.floor(set.reps),
+            })),
+        };
+        // Only exercises that came from an outline have this.
+        if (Number.isInteger(exercise.plannedSets) && exercise.plannedSets > 0) {
+          cleaned.plannedSets = exercise.plannedSets;
+        }
+        return cleaned;
+      }),
   };
+  // Only workouts from when workouts had titles have a name.
+  if (typeof item.name === 'string' && text60(item.name)) {
+    workout.name = text60(item.name);
+  }
+  return workout;
 }
 
 // ---------- Old device-only storage (IndexedDB), kept only for migration ----------
@@ -614,59 +668,62 @@ function workoutLink(workout) {
     h(
       'div',
       { class: 'row' },
-      h('strong', { class: 'grow' }, workout.name),
+      h('strong', { class: 'grow' }, workoutLabel(workout)),
       !workout.finishedAt && h('span', { class: 'badge' }, 'In progress')
     ),
-    h('span', { class: 'muted' }, `${formatDate(workout.startedAt)} · ${summary(workout)}`)
+    h(
+      'span',
+      { class: 'muted' },
+      [workout.name && formatDateTime(workout.startedAt), summary(workout), workout.finishedAt && workoutDuration(workout)]
+        .filter(Boolean)
+        .join(' · ')
+    )
   );
 }
 
 const newestFirst = () => [...workouts.values()].sort((a, b) => b.startedAt - a.startedAt);
 
+const sortedOutlines = () => [...outlines.values()].sort((a, b) => a.name.localeCompare(b.name));
+
+const outlineSummary = (outline) => outline.exercises.map((exercise) => exercise.name).join(', ') || 'No exercises';
+
+// Starts a workout now and opens it. With an outline, its exercises are already in it.
+function startWorkout(outline) {
+  const exercises = (outline?.exercises ?? []).map((item) => {
+    // The library's spelling, as when an exercise is added by hand.
+    const exercise = { id: newId(), name: library.get(exerciseKey(item.name))?.name ?? item.name, sets: [] };
+    if (item.sets > 0) {
+      exercise.plannedSets = item.sets;
+    }
+    return exercise;
+  });
+  const workout = { id: newId(), startedAt: Date.now(), finishedAt: null, exercises };
+  saveWorkout(workout, { used: exerciseNames(workout) });
+  location.hash = `#/workout/${workout.id}`;
+}
+
 function renderHome() {
   // Finished workouts live on the History screen (the three-dot button in the header).
   const unfinished = newestFirst().filter((workout) => !workout.finishedAt);
-
-  // The list can refresh while a name is being typed (a change arriving from another device).
-  const previous = view.querySelector('.new-workout input');
-  const nameInput = h('input', {
-    name: 'name',
-    placeholder: 'e.g. Push day',
-    'aria-label': 'Workout name',
-    maxlength: '60',
-    autocomplete: 'off',
-    required: true,
-  });
-  nameInput.value = previous?.value ?? '';
-  const refocus = previous && document.activeElement === previous;
-
-  const form = h(
-    'form',
-    {
-      class: 'card new-workout',
-      onsubmit: (event) => {
-        event.preventDefault();
-        const name = nameInput.value.trim();
-        if (!name) {
-          return;
-        }
-        const workout = { id: newId(), name, startedAt: Date.now(), finishedAt: null, exercises: [] };
-        nameInput.value = '';
-        saveWorkout(workout);
-        location.hash = `#/workout/${workout.id}`;
-      },
-    },
-    h('div', { class: 'row' }, h('div', { class: 'grow' }, nameInput), h('button', { class: 'btn' }, 'Start'))
-  );
+  const saved = sortedOutlines();
 
   view.replaceChildren(
-    h('h2', {}, 'New workout'),
-    form,
+    h('button', { class: 'btn block start-workout', type: 'button', onclick: () => startWorkout() }, 'Start workout'),
+    ...(saved.length
+      ? [
+          h('h2', {}, 'Start from an outline'),
+          ...saved.map((outline) =>
+            h(
+              'button',
+              { class: 'card outline-start', type: 'button', onclick: () => startWorkout(outline) },
+              h('strong', {}, outline.name),
+              h('span', { class: 'muted' }, outlineSummary(outline))
+            )
+          ),
+        ]
+      : []),
     ...(unfinished.length ? [h('h2', {}, 'In progress'), ...unfinished.map(workoutLink)] : [])
   );
-  if (refocus) {
-    nameInput.focus();
-  }
 }
 
 // ---------- History: every workout, newest first ----------
@@ -1139,8 +1196,29 @@ function rememberOpenSetValues() {
   }
 }
 
+// The clock at the top of a workout in progress. It is always worked out from startedAt,
+// so it is right after the app was closed, the phone slept, or the page was redrawn.
+let timerId = null;
+
+function stopTimer() {
+  clearInterval(timerId);
+  timerId = null;
+}
+
+function elapsedTimer(startedAt) {
+  const clock = h('div', { class: 'timer', role: 'timer', 'aria-label': 'Elapsed time' });
+  const tick = () => {
+    clock.textContent = formatClock(Date.now() - startedAt);
+  };
+  tick();
+  stopTimer();
+  timerId = setInterval(() => (clock.isConnected ? tick() : stopTimer()), 1000);
+  return clock;
+}
+
 function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
   rememberOpenSetValues();
+  stopTimer();
   closePad();
   closeExerciseList?.();
   if (openSet && !workout.exercises.some((exercise) => exercise.id === openSet.exerciseId)) {
@@ -1163,6 +1241,8 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
   const exerciseCards = workout.exercises.map((exercise) => {
     const last = exercise.sets[exercise.sets.length - 1];
     const card = `.exercise[data-id="${exercise.id}"]`;
+    // How many sets the outline this workout was started from had, while there are fewer.
+    const planned = exercise.plannedSets > exercise.sets.length ? exercise.plannedSets : 0;
 
     // "Last: 135 lb × 8" or "Max: 155 lb × 5"; pressing it switches between the two.
     // Last is the most recent set from before this workout. Max is the heaviest set ever,
@@ -1337,7 +1417,10 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
               )
             )
           )
-        : h('p', { class: 'muted' }, 'No sets yet.'),
+        : h('p', { class: 'muted' }, planned ? `No sets yet · ${plural(planned, 'set')} planned` : 'No sets yet.'),
+      planned > 0 &&
+        exercise.sets.length > 0 &&
+        h('p', { class: 'muted planned' }, `${exercise.sets.length} of ${planned} planned sets`),
       setHint(),
       openSet?.exerciseId === exercise.id ? setRow() : openButton()
     );
@@ -1354,14 +1437,21 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
 
   view.replaceChildren(
     h('a', { class: 'back', href: '#/' }, '← All workouts'),
-    h('h1', {}, workout.name),
+    ...(workout.finishedAt ? [] : [elapsedTimer(workout.startedAt)]),
+    h('h1', {}, workoutLabel(workout)),
     h(
       'div',
       { class: 'row workout-meta' },
       h(
         'p',
         { class: 'muted grow' },
-        `${formatDate(workout.startedAt)} · ${workout.finishedAt ? 'Finished' : 'In progress'} · ${summary(workout)}`
+        [
+          workout.name && formatDateTime(workout.startedAt),
+          workout.finishedAt ? `Finished · ${workoutDuration(workout)}` : 'In progress',
+          summary(workout),
+        ]
+          .filter(Boolean)
+          .join(' · ')
       ),
       unitToggle(() => redraw())
     ),
@@ -1379,7 +1469,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
             onclick: () => {
               workout.finishedAt = Date.now();
               saveWorkout(workout);
-              location.hash = '#/';
+              location.hash = `#/done/${workout.id}`;
             },
           },
           'Finish workout'
@@ -1390,7 +1480,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           class: 'btn danger block',
           type: 'button',
           onclick: () => {
-            if (!confirm(`Delete "${workout.name}"? This can't be undone.`)) {
+            if (!confirm(`Delete the workout from ${workoutLabel(workout)}? This can't be undone.`)) {
               return;
             }
             deleteWorkout(workout.id);
@@ -1408,6 +1498,131 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
     focusTarget.focus();
   } else if (focusTarget) {
     focusWithoutPad(focusTarget);
+  }
+}
+
+// ---------- Workout completed ----------
+
+// The exercises in this workout that went better than in the last workout before it that
+// has them: a heavier top set, or more reps at the same top weight. An exercise being done
+// for the first time has nothing to compare with and is not listed.
+// Returns [{ name, before, top, best }], the two top sets and whether `top` is now the
+// heaviest set in the library (the all-time best).
+function improvements(workout) {
+  const setsFor = (other, key) =>
+    (Array.isArray(other.exercises) ? other.exercises : [])
+      .filter((exercise) => exerciseKey(exercise?.name) === key)
+      .flatMap((exercise) => (Array.isArray(exercise.sets) ? exercise.sets : []))
+      .filter((set) => set && Number.isFinite(set.weight) && Number.isFinite(set.reps));
+  const topOf = (sets) => sets.reduce((best, set) => (beats(set, best) ? set : best), null);
+
+  const earlier = [...workouts.values()]
+    .filter((other) => other.id !== workout.id && (other.startedAt || 0) <= (workout.startedAt || 0))
+    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+
+  const improved = [];
+  const seen = new Set();
+  for (const exercise of workout.exercises) {
+    const key = exerciseKey(exercise.name);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    const top = topOf(setsFor(workout, key));
+    const previous = top && earlier.map((other) => setsFor(other, key)).find((sets) => sets.length);
+    const before = previous && topOf(previous);
+    if (before && beats(top, before)) {
+      // The library's max carries the date of the workout it is in.
+      const max = library.get(key)?.max;
+      const best = Boolean(max && max.date === workout.startedAt && !beats(max, top));
+      improved.push({ name: exercise.name, before, top, best });
+    }
+  }
+  return improved;
+}
+
+// outlineState: undefined (just the button), 'naming' (the name form is open), or
+// { saved: name } once an outline has been saved.
+function renderDone(workout, outlineState) {
+  const improved = improvements(workout);
+
+  const nameInput = h('input', {
+    name: 'outline',
+    placeholder: 'e.g. Push day',
+    'aria-label': 'Outline name',
+    maxlength: '60',
+    autocomplete: 'off',
+    required: true,
+  });
+  let outlineBox;
+  if (outlineState?.saved) {
+    outlineBox = h('p', { class: 'muted status', role: 'status' }, `Saved "${outlineState.saved}". Start it from the home screen.`);
+  } else if (outlineState === 'naming') {
+    outlineBox = h(
+      'form',
+      {
+        class: 'card save-outline',
+        onsubmit: (event) => {
+          event.preventDefault();
+          const name = nameInput.value.trim();
+          if (!name) {
+            return;
+          }
+          saveOutline({
+            id: newId(),
+            name,
+            createdAt: Date.now(),
+            exercises: workout.exercises.map((exercise) => ({ name: exercise.name, sets: exercise.sets.length })),
+          });
+          renderDone(workout, { saved: name });
+        },
+      },
+      h('p', { class: 'muted' }, `Saves these exercises and how many sets each had: ${exerciseNames(workout).join(', ')}.`),
+      h('div', { class: 'row' }, h('div', { class: 'grow' }, nameInput), h('button', { class: 'btn' }, 'Save'))
+    );
+  } else {
+    outlineBox = h(
+      'button',
+      {
+        class: 'btn secondary block',
+        type: 'button',
+        disabled: workout.exercises.length === 0,
+        onclick: () => renderDone(workout, 'naming'),
+      },
+      'Save as outline'
+    );
+  }
+
+  view.replaceChildren(
+    h('h1', {}, 'Workout completed'),
+    h('p', { class: 'muted done-when' }, workoutLabel(workout)),
+    h(
+      'div',
+      { class: 'card total-time' },
+      h('span', { class: 'muted' }, 'Total time'),
+      h('strong', {}, workoutDuration(workout)),
+      h('span', { class: 'muted' }, summary(workout))
+    ),
+    h('h2', {}, 'Improved'),
+    improved.length
+      ? h(
+          'ul',
+          { class: 'card improved' },
+          improved.map(({ name, before, top, best }) =>
+            h(
+              'li',
+              {},
+              h('strong', {}, `${name}: `),
+              `${formatSet(before)} → ${formatSet(top)}`,
+              best && h('span', { class: 'badge' }, 'All-time best')
+            )
+          )
+        )
+      : h('p', { class: 'muted' }, 'Nothing beat last time today, and that is fine. You showed up and did the work.'),
+    h('div', { class: 'actions' }, outlineBox, h('a', { class: 'btn block', href: '#/' }, 'Done'))
+  );
+  if (outlineState === 'naming') {
+    nameInput.focus();
   }
 }
 
@@ -1455,7 +1670,60 @@ async function importWorkouts(file) {
   return list.length;
 }
 
-function renderSettings(backupMessage) {
+// One saved outline on the Settings screen: its name in a box to rename it, and a delete button.
+function outlineSettingsCard(outline) {
+  const nameInput = h('input', {
+    name: 'name',
+    value: outline.name,
+    'aria-label': 'Outline name',
+    maxlength: '60',
+    autocomplete: 'off',
+    required: true,
+  });
+  return h(
+    'form',
+    {
+      class: 'card outline-edit',
+      onsubmit: (event) => {
+        event.preventDefault();
+        const name = nameInput.value.trim();
+        if (!name) {
+          return;
+        }
+        if (name !== outline.name) {
+          saveOutline({ ...outline, name });
+          renderSettings(null, `Renamed to "${name}".`);
+        }
+      },
+    },
+    h(
+      'div',
+      { class: 'row' },
+      h('div', { class: 'grow' }, nameInput),
+      h('button', { class: 'btn secondary' }, 'Rename'),
+      h(
+        'button',
+        {
+          class: 'icon-btn destructive',
+          type: 'button',
+          'aria-label': `Delete outline ${outline.name}`,
+          onclick: () => {
+            if (!confirm(`Delete the outline "${outline.name}"? Workouts started from it are kept.`)) {
+              return;
+            }
+            deleteOutline(outline.id);
+            renderSettings(null, `Deleted "${outline.name}".`);
+          },
+        },
+        '×'
+      )
+    ),
+    h('p', { class: 'muted' }, outlineSummary(outline))
+  );
+}
+
+function renderSettings(backupMessage, outlineMessage) {
+  const saved = sortedOutlines();
   const fileInput = h('input', {
     type: 'file',
     accept: 'application/json,.json',
@@ -1506,6 +1774,11 @@ function renderSettings(backupMessage) {
         'Weights are shown in this unit and new sets are saved in it. Sets you already logged keep the unit they were entered in and are converted for display.'
       )
     ),
+    h('h2', {}, 'Outlines'),
+    ...(saved.length
+      ? saved.map(outlineSettingsCard)
+      : [h('p', { class: 'muted' }, 'No outlines yet. Finish a workout and choose "Save as outline" to make one.')]),
+    ...(outlineMessage ? [h('p', { class: 'muted status', role: 'status' }, outlineMessage)] : []),
     h('h2', {}, 'Backup'),
     h(
       'div',
@@ -1536,9 +1809,10 @@ function renderSettings(backupMessage) {
 // ---------- Routing ----------
 
 // The home and history screens are lists that are safe to redraw when data changes.
-const onHomeScreen = () => location.hash !== '#/settings' && !location.hash.startsWith('#/workout/');
+const onListScreen = () => ['', '#', '#/', '#/history'].includes(location.hash);
 
 function route() {
+  stopTimer();
   closePad();
   closeExerciseList?.();
   setAccountMenu(false);
@@ -1550,7 +1824,7 @@ function route() {
     renderSignedOut();
     return;
   }
-  if (!workoutsReady || !settingsReady || !libraryReady) {
+  if (!workoutsReady || !settingsReady || !libraryReady || !outlinesReady) {
     renderMessage('Loading your workouts…');
     return;
   }
@@ -1563,11 +1837,16 @@ function route() {
     renderHistory();
     return;
   }
-  const match = location.hash.match(/^#\/workout\/(.+)$/);
+  const match = location.hash.match(/^#\/(workout|done)\/(.+)$/);
   if (match) {
-    const workout = workouts.get(decodeURIComponent(match[1]));
+    const workout = workouts.get(decodeURIComponent(match[2]));
     if (workout) {
-      renderWorkout(workout);
+      // The "Workout completed" page only exists for a finished workout.
+      if (match[1] === 'done' && workout.finishedAt) {
+        renderDone(workout);
+      } else {
+        renderWorkout(workout);
+      }
       window.scrollTo(0, 0);
       return;
     }
@@ -1586,6 +1865,8 @@ function onUserChanged(nextUser) {
   settingsReady = false;
   library = new Map();
   libraryReady = false;
+  outlines = new Map();
+  outlinesReady = false;
   renderHeader();
   route();
   if (!user) {
@@ -1601,7 +1882,7 @@ function onUserChanged(nextUser) {
       const first = !workoutsReady;
       workoutsReady = true;
       // Don't redraw a workout or the settings page under the user's fingers.
-      if (first || onHomeScreen()) {
+      if (first || onListScreen()) {
         route();
       }
     },
@@ -1660,10 +1941,40 @@ function onUserChanged(nextUser) {
     console.error(error);
     libraryLoaded([]); // the app still works without suggestions
   });
+  const outlinesLoaded = (list) => {
+    outlines = new Map();
+    for (const item of list) {
+      const name = typeof item.name === 'string' ? item.name.trim() : '';
+      if (!name) {
+        continue;
+      }
+      outlines.set(item.id, {
+        id: item.id,
+        name,
+        createdAt: item.createdAt || 0,
+        exercises: (Array.isArray(item.exercises) ? item.exercises : [])
+          .filter((exercise) => exercise && typeof exercise.name === 'string' && exercise.name.trim())
+          .map((exercise) => ({
+            name: exercise.name.trim(),
+            sets: Number.isInteger(exercise.sets) && exercise.sets > 0 ? exercise.sets : 0,
+          })),
+      });
+    }
+    const first = !outlinesReady;
+    outlinesReady = true;
+    if (first || onListScreen()) {
+      route();
+    }
+  };
+  const stopOutlines = fb.watchOutlines(uid, outlinesLoaded, (error) => {
+    console.error(error);
+    outlinesLoaded([]); // the app still works without outlines
+  });
   stopWatching = () => {
     stopWorkouts();
     stopSettings();
     stopLibrary();
+    stopOutlines();
   };
   migrateLocalWorkouts(uid);
 }
