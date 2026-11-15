@@ -1154,19 +1154,28 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
     redraw(nextFocus);
   };
 
+  // What the workouts before this one say about its exercises, for the "Last:" line.
+  const earlier = deriveLibrary(
+    [...workouts.values()].filter((other) => other.id !== workout.id && (other.startedAt || 0) <= (workout.startedAt || 0)),
+    new Set(workout.exercises.map((exercise) => exerciseKey(exercise.name)))
+  );
+
   const exerciseCards = workout.exercises.map((exercise) => {
     const last = exercise.sets[exercise.sets.length - 1];
     const card = `.exercise[data-id="${exercise.id}"]`;
 
-    // "Last: 135 lb × 8" or "Max: 155 lb × 5" from the exercise library; pressing it
-    // switches between the two. Not shown until the exercise has a set somewhere.
+    // "Last: 135 lb × 8" or "Max: 155 lb × 5"; pressing it switches between the two.
+    // Last is the most recent set from before this workout. Max is the heaviest set ever,
+    // this workout included. Not shown for an exercise with no sets before this workout.
     const setHint = () => {
-      const entry = library.get(exerciseKey(exercise.name));
-      if (!entry?.last || !entry.max) {
+      const key = exerciseKey(exercise.name);
+      const previous = earlier.get(key)?.last;
+      const max = library.get(key)?.max;
+      if (!previous || !max) {
         return null;
       }
       const showMax = settings.setHint === 'max';
-      const text = `${showMax ? 'Max' : 'Last'}: ${formatSet(showMax ? entry.max : entry.last)}`;
+      const text = `${showMax ? 'Max' : 'Last'}: ${formatSet(showMax ? max : previous)}`;
       return h(
         'div',
         { class: 'set-hint-row' },
