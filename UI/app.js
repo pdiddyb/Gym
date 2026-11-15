@@ -7,8 +7,13 @@ let fb = null; // the firebase.js module, once loaded
 let user = null; // signed-in Firebase user, or null
 let workouts = new Map(); // id -> workout, kept current by a Firestore listener
 let workoutsReady = false;
-let settings = { unit: 'lb' }; // saved in the account; lb until the user chooses otherwise
+// Saved in the account. unit: lb until the user chooses otherwise. setHint: whether exercise
+// cards show the last set or the heaviest set ('last' or 'max').
+const DEFAULT_SETTINGS = { unit: 'lb', setHint: 'last' };
+let settings = { ...DEFAULT_SETTINGS };
 let settingsReady = false;
+let library = new Map(); // exercise key -> library entry, kept current by a Firestore listener
+let libraryReady = false;
 let stopWatching = null;
 let signInError = null;
 let localCount = 0; // workouts still in this device's old IndexedDB store
@@ -47,6 +52,8 @@ const ICONS = {
   keyboardDown:
     '<rect x="3" y="3.5" width="18" height="11" rx="2"/><path d="M7 7.5h.01M11 7.5h.01M15 7.5h.01M8 11h8"/><path d="M9 18l3 3 3-3"/>',
   backspace: '<path d="M21 5H9l-6 7 6 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z"/><path d="M17 9.5l-5 5M12 9.5l5 5"/>',
+  // two arrows pointing opposite ways
+  swap: '<path d="M7 4L3 8l4 4"/><path d="M3 8h14"/><path d="M17 12l4 4-4 4"/><path d="M21 16H7"/>',
 };
 
 function icon(name) {
@@ -144,19 +151,159 @@ function reportSaveError(error) {
 
 // These update the screen's copy straight away. Firestore stores the change on the device
 // and uploads it when there is a connection, so nothing here waits for the network.
-function saveWorkout(workout) {
+//
+// Each one also brings the exercise library up to date for the exercises it touched.
+// `used` names exercises the user has just added or logged a set for; `removed` names
+// exercises that were taken out of the workout (they are no longer in it to be found).
+function saveWorkout(workout, { used = [], removed = [] } = {}) {
   workouts.set(workout.id, workout);
   fb.saveWorkout(user.uid, workout).catch(reportSaveError);
+  syncLibrary([...exerciseNames(workout), ...removed], used);
 }
 
 function deleteWorkout(id) {
+  const touched = exerciseNames(workouts.get(id));
   workouts.delete(id);
   fb.deleteWorkout(user.uid, id).catch(reportSaveError);
+  syncLibrary(touched);
 }
 
 function saveWorkouts(list) {
+  // Exercises in the new workouts, and in the versions of them that are being replaced.
+  const touched = list.flatMap((workout) => [...exerciseNames(workout), ...exerciseNames(workouts.get(workout.id))]);
   list.forEach((workout) => workouts.set(workout.id, workout));
   fb.saveWorkouts(user.uid, list).catch(reportSaveError);
+  syncLibrary(touched);
+}
+
+// ---------- Exercise library ----------
+//
+// users/{uid}/exercises has one entry for each exercise that is in any of the user's
+// workouts: { name, key, lastUsedAt, last, max }. `last` is the most recent set and `max`
+// the heaviest one, each { weight, unit, reps, date } exactly as the set was entered, or
+// null when the exercise has no sets yet. Sets carry no time of their own, so `date` is
+// the start of the workout the set is in.
+//
+// `last` and `max` are always worked out again from the workouts rather than adjusted, so
+// deleting a set (even the heaviest one) leaves them correct.
+
+// Names that differ only in case or spacing are the same exercise.
+const exerciseKey = (name) => String(name ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+// The Firestore document id for a key. It is derived from the key, so the same exercise
+// added on two devices lands in one document. Anything but a-z and 0-9 is spelled out as
+// its character code, which keeps the id to characters Firestore accepts.
+const exerciseDocId = (key) => `e_${key.replace(/[^a-z0-9]/g, (char) => `_${char.charCodeAt(0).toString(16)}_`)}`;
+
+const exerciseNames = (workout) => (Array.isArray(workout?.exercises) ? workout.exercises : []).map((exercise) => exercise?.name);
+
+const setInKg = (set) => convertWeight(set.weight, unitOf(set), 'kg');
+
+// Reads the given workouts and returns key -> { name, lastUsedAt, last, max } for every
+// exercise in them, or only for the keys in `wanted`.
+function deriveLibrary(list, wanted = null) {
+  const found = new Map();
+  const oldestFirst = [...list].sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  for (const workout of oldestFirst) {
+    const date = workout.startedAt || 0;
+    for (const exercise of Array.isArray(workout.exercises) ? workout.exercises : []) {
+      const key = exerciseKey(exercise?.name);
+      if (!key || (wanted && !wanted.has(key))) {
+        continue;
+      }
+      let entry = found.get(key);
+      if (!entry) {
+        entry = { name: '', lastUsedAt: 0, last: null, max: null };
+        found.set(key, entry);
+      }
+      // Later workouts overwrite earlier ones, so these end up as the most recent.
+      entry.name = String(exercise.name).trim();
+      entry.lastUsedAt = date;
+      for (const set of Array.isArray(exercise.sets) ? exercise.sets : []) {
+        if (!set || !Number.isFinite(set.weight) || !Number.isFinite(set.reps)) {
+          continue;
+        }
+        const record = { weight: set.weight, unit: unitOf(set), reps: set.reps, date };
+        entry.last = record;
+        // Heaviest wins; at the same weight, more reps wins; a tie keeps the earlier set.
+        const heavier = !entry.max || setInKg(record) > setInKg(entry.max);
+        if (heavier || (setInKg(record) === setInKg(entry.max) && record.reps > entry.max.reps)) {
+          entry.max = record;
+        }
+      }
+    }
+  }
+  return found;
+}
+
+// The entry to store for a key. An entry that already exists keeps its id and its name.
+function libraryEntry(key, found, existing, usedNow = false) {
+  return {
+    id: existing?.id ?? exerciseDocId(key),
+    name: existing?.name ?? found.name,
+    key,
+    lastUsedAt: usedNow ? Date.now() : Math.max(existing?.lastUsedAt ?? 0, found.lastUsedAt),
+    last: found.last,
+    max: found.max,
+  };
+}
+
+const sameRecord = (a, b) =>
+  a === b || Boolean(a && b && a.weight === b.weight && a.unit === b.unit && a.reps === b.reps && a.date === b.date);
+
+// Brings the library entries for these exercise names in line with the workouts as they
+// are now: creates the missing ones, updates last/max, and removes an entry whose exercise
+// is no longer in any workout. Only entries that actually changed are written.
+function syncLibrary(names, usedNames = []) {
+  const keys = new Set(names.map(exerciseKey).filter(Boolean));
+  if (!keys.size) {
+    return;
+  }
+  const usedKeys = new Set(usedNames.map(exerciseKey));
+  const found = deriveLibrary(workouts.values(), keys);
+  const saves = [];
+  const removedIds = [];
+  for (const key of keys) {
+    const existing = library.get(key);
+    if (!found.has(key)) {
+      if (existing) {
+        library.delete(key);
+        removedIds.push(existing.id);
+      }
+      continue;
+    }
+    const entry = libraryEntry(key, found.get(key), existing, usedKeys.has(key));
+    const unchanged =
+      existing &&
+      existing.lastUsedAt === entry.lastUsedAt &&
+      sameRecord(existing.last, entry.last) &&
+      sameRecord(existing.max, entry.max);
+    if (!unchanged) {
+      library.set(key, entry);
+      saves.push(entry);
+    }
+  }
+  if (saves.length || removedIds.length) {
+    fb.saveExercises(user.uid, saves, removedIds).catch(reportSaveError);
+  }
+}
+
+// Runs once per account (settings.libraryBuilt records that it has): fills the library
+// from every workout the account already has. It reads the workouts from the server so a
+// device with an incomplete offline copy can't build a partial library; with no connection
+// it does nothing and runs again on the next launch. Running it twice is harmless.
+async function buildLibrary(uid) {
+  try {
+    const found = deriveLibrary(await fb.serverWorkouts(uid));
+    const known = user?.uid === uid ? library : new Map();
+    await fb.saveExercises(
+      uid,
+      [...found].map(([key, entry]) => libraryEntry(key, entry, known.get(key)))
+    );
+    await fb.saveSettings(uid, { libraryBuilt: true });
+  } catch (error) {
+    console.warn('Building the exercise library will be retried next time.', error);
+  }
 }
 
 // Returns a clean workout object, or throws if the input isn't one.
@@ -252,6 +399,9 @@ async function migrateLocalWorkouts(uid) {
     await fb.saveWorkouts(uid, missing);
     await deleteLocalWorkouts(local.map((workout) => workout.id));
     localCount = 0;
+    if (user?.uid === uid) {
+      syncLibrary(missing.flatMap(exerciseNames));
+    }
     if (missing.length) {
       notify(`Moved ${plural(missing.length, 'workout')} from this device into your account.`);
     }
@@ -789,6 +939,193 @@ function unitToggle(afterChange) {
   );
 }
 
+// The small button on an exercise card that shows the last set or the heaviest set.
+function setSetHint(which) {
+  settings = { ...settings, setHint: which };
+  fb.saveSettings(user.uid, { setHint: which }).catch(reportSaveError);
+}
+
+// ---------- "Add exercise" box, with suggestions from the exercise library ----------
+//
+// A combobox: the text box owns a list of the user's exercises that opens when the box is
+// focused and narrows as they type. Focus never leaves the box; arrow keys move a highlight
+// through the list (aria-activedescendant) and Enter picks the highlighted one.
+
+let closeExerciseList = null; // closes the suggestion list, while one is showing
+
+// Scrolls just enough that the open list is on screen, above the phone keyboard if it is up.
+function revealExerciseList() {
+  const form = view.querySelector('.add-exercise');
+  if (!closeExerciseList || !form) {
+    return;
+  }
+  const viewport = window.visualViewport;
+  const visibleBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+  const rect = form.getBoundingClientRect();
+  const headerBottom = Math.max(0, document.querySelector('.bar')?.getBoundingClientRect().bottom ?? 0);
+  const hidden = rect.bottom + 8 - visibleBottom;
+  const room = rect.top - headerBottom - 8; // never push the box itself under the header
+  if (hidden > 0 && room > 0) {
+    window.scrollBy(0, Math.min(hidden, room));
+  }
+}
+// The phone keyboard opening or closing changes how much of the page is visible.
+window.visualViewport?.addEventListener('resize', revealExerciseList);
+
+// Tapping anywhere outside the box and its list closes the list.
+document.addEventListener('pointerdown', (event) => {
+  if (closeExerciseList && !event.target.closest?.('.add-exercise')) {
+    closeExerciseList();
+  }
+});
+
+// `add` is called with the chosen or typed name.
+function addExerciseForm(workout, add) {
+  const inWorkout = new Set(workout.exercises.map((exercise) => exerciseKey(exercise.name)));
+  // Most recently used first. Exercises already in this workout go to the end: they are
+  // the most recent of all, and the least likely to be wanted again.
+  const entries = [...library.values()].sort(
+    (a, b) => inWorkout.has(a.key) - inWorkout.has(b.key) || b.lastUsedAt - a.lastUsedAt || a.name.localeCompare(b.name)
+  );
+  let matches = [];
+  let active = -1; // index of the highlighted option, or -1
+
+  const list = h('ul', {
+    class: 'exercise-list',
+    id: 'exercise-list',
+    role: 'listbox',
+    'aria-label': 'Your exercises',
+    hidden: true,
+  });
+
+  const setActive = (index) => {
+    active = index;
+    [...list.children].forEach((option, position) => {
+      option.classList.toggle('active', position === index);
+      option.setAttribute('aria-selected', String(position === index));
+    });
+    if (index >= 0) {
+      input.setAttribute('aria-activedescendant', list.children[index].id);
+      list.children[index].scrollIntoView({ block: 'nearest' });
+    } else {
+      input.removeAttribute('aria-activedescendant');
+    }
+  };
+
+  const close = () => {
+    if (closeExerciseList === close) {
+      closeExerciseList = null;
+    }
+    if (list.hidden) {
+      return;
+    }
+    setActive(-1);
+    list.hidden = true;
+    input.setAttribute('aria-expanded', 'false');
+    document.body.classList.remove('exercise-list-open');
+  };
+
+  // Shows the exercises whose name contains what has been typed (all of them when the box
+  // is empty), or closes the list when there are none.
+  const open = () => {
+    const typed = exerciseKey(input.value);
+    matches = entries.filter((entry) => entry.key.includes(typed));
+    list.replaceChildren(
+      ...matches.map((entry, index) =>
+        h(
+          'li',
+          { id: `exercise-option-${index}`, role: 'option', 'aria-selected': 'false' },
+          h('span', { class: 'grow' }, entry.name),
+          inWorkout.has(entry.key) && h('span', { class: 'muted' }, 'In this workout')
+        )
+      )
+    );
+    setActive(-1);
+    if (!matches.length) {
+      close();
+      return;
+    }
+    list.hidden = false;
+    list.scrollTop = 0;
+    input.setAttribute('aria-expanded', 'true');
+    // Room at the bottom of the page so the list can scroll clear of the phone keyboard.
+    document.body.classList.add('exercise-list-open');
+    closeExerciseList = close;
+    revealExerciseList();
+  };
+
+  const input = h('input', {
+    name: 'exercise',
+    placeholder: 'e.g. Bench press',
+    'aria-label': 'Exercise name',
+    maxlength: '60',
+    autocomplete: 'off',
+    required: true,
+    role: 'combobox',
+    'aria-autocomplete': 'list',
+    'aria-expanded': 'false',
+    'aria-controls': 'exercise-list',
+    onfocus: open,
+    oninput: open,
+    onblur: close,
+    // A tap on the box when it already has focus, after Escape closed the list.
+    onclick: () => {
+      if (list.hidden) {
+        open();
+      }
+    },
+    onkeydown: (event) => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (list.hidden) {
+          open();
+        }
+        if (!list.hidden) {
+          const next = active + (event.key === 'ArrowDown' ? 1 : -1);
+          setActive(Math.max(-1, Math.min(matches.length - 1, next)));
+        }
+      } else if (event.key === 'Enter' && !list.hidden && active >= 0) {
+        event.preventDefault(); // pick the highlighted exercise instead of the typed text
+        add(matches[active].name);
+      } else if (event.key === 'Escape' && !list.hidden) {
+        close();
+      }
+    },
+  });
+
+  // Pressing on the list must not take focus from the box: that would close the list (and
+  // the phone keyboard) before the tap lands.
+  list.addEventListener('mousedown', (event) => event.preventDefault());
+  list.addEventListener('click', (event) => {
+    const option = event.target.closest('li');
+    if (option) {
+      add(matches[[...list.children].indexOf(option)].name);
+    }
+  });
+
+  return h(
+    'form',
+    {
+      class: 'card add-exercise',
+      onsubmit: (event) => {
+        event.preventDefault();
+        const name = input.value.trim();
+        if (name) {
+          add(name);
+        }
+      },
+    },
+    h(
+      'div',
+      { class: 'row' },
+      h('div', { class: 'grow' }, input),
+      // Keeps focus in the box, so the list closing can't move this button from under the tap.
+      h('button', { class: 'btn secondary', onmousedown: (event) => event.preventDefault() }, 'Add exercise')
+    ),
+    list
+  );
+}
+
 // Which exercise has its "add a set" row open, and what has been typed into it so far.
 // Only one can be open at a time. This lives in memory only (it is never saved to the
 // account), so the row stays open, with its values, when the screen is redrawn after a save.
@@ -805,19 +1142,50 @@ function rememberOpenSetValues() {
 function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
   rememberOpenSetValues();
   closePad();
+  closeExerciseList?.();
   if (openSet && !workout.exercises.some((exercise) => exercise.id === openSet.exerciseId)) {
     openSet = null; // its exercise was removed
   }
 
   const redraw = (nextFocus, withPad = false) => renderWorkout(workout, nextFocus, withPad);
-  const commit = (nextFocus, withPad = false) => {
-    saveWorkout(workout);
-    redraw(nextFocus, withPad);
+  // libraryChanges: see saveWorkout.
+  const commit = (nextFocus, libraryChanges) => {
+    saveWorkout(workout, libraryChanges);
+    redraw(nextFocus);
   };
 
   const exerciseCards = workout.exercises.map((exercise) => {
     const last = exercise.sets[exercise.sets.length - 1];
     const card = `.exercise[data-id="${exercise.id}"]`;
+
+    // "Last: 135 lb × 8" or "Max: 155 lb × 5" from the exercise library; pressing it
+    // switches between the two. Not shown until the exercise has a set somewhere.
+    const setHint = () => {
+      const entry = library.get(exerciseKey(exercise.name));
+      if (!entry?.last || !entry.max) {
+        return null;
+      }
+      const showMax = settings.setHint === 'max';
+      const text = `${showMax ? 'Max' : 'Last'}: ${formatSet(showMax ? entry.max : entry.last)}`;
+      return h(
+        'div',
+        { class: 'set-hint-row' },
+        h(
+          'button',
+          {
+            class: 'set-hint',
+            type: 'button',
+            'aria-label': `${text}. Show ${showMax ? 'last set' : 'heaviest set'} instead.`,
+            onclick: () => {
+              setSetHint(showMax ? 'last' : 'max');
+              redraw(`${card} .set-hint`);
+            },
+          },
+          h('span', {}, text),
+          icon('swap')
+        )
+      );
+    };
 
     // Closed: just a button. Opening it closes any other exercise's row without saving.
     const openButton = () =>
@@ -888,7 +1256,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
             }
             exercise.sets.push({ id: newId(), weight, unit, reps });
             openSet = null; // back to the "+ Add set" button; the next set is opened by hand
-            commit(`${card} .open-set`);
+            commit(`${card} .open-set`, { used: [exercise.name] });
           },
         },
         h('label', {}, `Weight (${settings.unit})`, weightInput),
@@ -928,7 +1296,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
                 return;
               }
               workout.exercises = workout.exercises.filter((item) => item !== exercise);
-              commit();
+              commit(null, { removed: [exercise.name] });
             },
           },
           '×'
@@ -961,41 +1329,19 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
             )
           )
         : h('p', { class: 'muted' }, 'No sets yet.'),
+      setHint(),
       openSet?.exerciseId === exercise.id ? setRow() : openButton()
     );
   });
 
-  const exerciseInput = h('input', {
-    name: 'exercise',
-    placeholder: 'e.g. Bench press',
-    'aria-label': 'Exercise name',
-    maxlength: '60',
-    autocomplete: 'off',
-    required: true,
+  const addExercise = addExerciseForm(workout, (typed) => {
+    // A name that differs only in case or spacing from one in the library is that exercise,
+    // and takes the library's spelling.
+    const name = library.get(exerciseKey(typed))?.name ?? typed;
+    const exercise = { id: newId(), name, sets: [] };
+    workout.exercises.push(exercise);
+    commit(`.exercise[data-id="${exercise.id}"] .open-set`, { used: [name] });
   });
-
-  const addExercise = h(
-    'form',
-    {
-      class: 'card add-exercise',
-      onsubmit: (event) => {
-        event.preventDefault();
-        const name = exerciseInput.value.trim();
-        if (!name) {
-          return;
-        }
-        const exercise = { id: newId(), name, sets: [] };
-        workout.exercises.push(exercise);
-        commit(`.exercise[data-id="${exercise.id}"] .open-set`);
-      },
-    },
-    h(
-      'div',
-      { class: 'row' },
-      h('div', { class: 'grow' }, exerciseInput),
-      h('button', { class: 'btn secondary' }, 'Add exercise')
-    )
-  );
 
   view.replaceChildren(
     h('a', { class: 'back', href: '#/' }, '← All workouts'),
@@ -1185,6 +1531,7 @@ const onHomeScreen = () => location.hash !== '#/settings' && !location.hash.star
 
 function route() {
   closePad();
+  closeExerciseList?.();
   setAccountMenu(false);
   openSet = null;
   if (!fb) {
@@ -1194,7 +1541,7 @@ function route() {
     renderSignedOut();
     return;
   }
-  if (!workoutsReady || !settingsReady) {
+  if (!workoutsReady || !settingsReady || !libraryReady) {
     renderMessage('Loading your workouts…');
     return;
   }
@@ -1226,8 +1573,10 @@ function onUserChanged(nextUser) {
   stopWatching = null;
   workouts = new Map();
   workoutsReady = false;
-  settings = { unit: 'lb' };
+  settings = { ...DEFAULT_SETTINGS };
   settingsReady = false;
+  library = new Map();
+  libraryReady = false;
   renderHeader();
   route();
   if (!user) {
@@ -1260,26 +1609,52 @@ function onUserChanged(nextUser) {
       );
     }
   );
-  const settingsLoaded = (unit) => {
+  const settingsLoaded = ({ unit, setHint }) => {
     const first = !settingsReady;
     settingsReady = true;
-    const changed = unit !== settings.unit; // false for the echo of a change made here
-    settings = { ...settings, unit };
+    const changed = unit !== settings.unit || setHint !== settings.setHint; // false for the echo of a change made here
+    settings = { ...settings, unit, setHint };
     if (first || changed) {
       route();
     }
   };
   const stopSettings = fb.watchSettings(
     uid,
-    (saved) => settingsLoaded(saved.unit === 'kg' ? 'kg' : 'lb'), // nothing saved yet means lb
+    (saved) => {
+      const first = !settingsReady;
+      // Nothing saved yet means the defaults.
+      settingsLoaded({ unit: saved.unit === 'kg' ? 'kg' : 'lb', setHint: saved.setHint === 'max' ? 'max' : 'last' });
+      if (first && !saved.libraryBuilt) {
+        buildLibrary(uid);
+      }
+    },
     (error) => {
       console.error(error);
-      settingsLoaded(settings.unit); // carry on with what we have
+      settingsLoaded(settings); // carry on with what we have
     }
   );
+  const libraryLoaded = (list) => {
+    library = new Map();
+    for (const item of list) {
+      const key = typeof item.name === 'string' ? exerciseKey(item.name) : '';
+      if (key) {
+        library.set(key, { ...item, key, lastUsedAt: item.lastUsedAt || 0 });
+      }
+    }
+    // Later changes are picked up the next time a screen is drawn; nothing is redrawn here.
+    if (!libraryReady) {
+      libraryReady = true;
+      route();
+    }
+  };
+  const stopLibrary = fb.watchExercises(uid, libraryLoaded, (error) => {
+    console.error(error);
+    libraryLoaded([]); // the app still works without suggestions
+  });
   stopWatching = () => {
     stopWorkouts();
     stopSettings();
+    stopLibrary();
   };
   migrateLocalWorkouts(uid);
 }

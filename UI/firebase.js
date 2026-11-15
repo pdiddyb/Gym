@@ -1,4 +1,5 @@
-// Firebase wiring: Google sign-in (Auth) and per-user workout storage (Firestore).
+// Firebase wiring: Google sign-in (Auth) and per-user storage (Firestore) for workouts,
+// settings and the exercise library.
 // The SDK is loaded straight from Google's CDN; there is no build step.
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js';
@@ -123,4 +124,39 @@ export function saveSettings(uid, changes) {
 export async function serverWorkoutIds(uid) {
   const snapshot = await getDocsFromServer(workoutsOf(uid));
   return new Set(snapshot.docs.map((item) => item.id));
+}
+
+// Every workout the server has for this user. Rejects when offline.
+export async function serverWorkouts(uid) {
+  const snapshot = await getDocsFromServer(workoutsOf(uid));
+  return snapshot.docs.map((item) => ({ ...item.data(), id: item.id }));
+}
+
+// ---------- Exercise library: users/{uid}/exercises/{exerciseId} ----------
+
+const exercisesOf = (uid) => collection(db, 'users', uid, 'exercises');
+const exerciseRef = (uid, id) => doc(db, 'users', uid, 'exercises', id);
+
+// Calls onData with the whole library now and again after every change. Works offline.
+export function watchExercises(uid, onData, onError) {
+  return onSnapshot(
+    exercisesOf(uid),
+    (snapshot) => onData(snapshot.docs.map((item) => ({ ...item.data(), id: item.id }))),
+    onError
+  );
+}
+
+// Saves the given library entries and deletes the ones whose ids are in removedIds.
+export function saveExercises(uid, entries, removedIds = []) {
+  const writes = [
+    ...entries.map((entry) => (batch) => batch.set(exerciseRef(uid, entry.id), withoutId(entry))),
+    ...removedIds.map((id) => (batch) => batch.delete(exerciseRef(uid, id))),
+  ];
+  const commits = [];
+  for (let start = 0; start < writes.length; start += 400) {
+    const batch = writeBatch(db);
+    writes.slice(start, start + 400).forEach((write) => write(batch));
+    commits.push(batch.commit());
+  }
+  return Promise.all(commits);
 }

@@ -521,6 +521,98 @@ h1 + p {
   margin-top: 10px;
 }
 
+/* "Last: 135 lb × 8" / "Max: 155 lb × 5" switch above the set row */
+
+.set-hint-row {
+  margin-top: 10px;
+}
+
+.set-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 36px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--control);
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.set-hint:hover {
+  color: var(--text);
+}
+
+.set-hint .icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+/* "Add exercise" suggestions */
+
+.exercise-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  /* About six rows; the rest scroll. */
+  max-height: min(40vh, 270px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--control);
+  border-radius: 8px;
+}
+
+.exercise-list[hidden] {
+  display: none;
+}
+
+.exercise-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.exercise-list li:last-child {
+  border-bottom: 0;
+}
+
+.exercise-list li > .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.exercise-list li > .muted {
+  flex: none;
+  font-size: 0.8rem;
+}
+
+.exercise-list li:hover {
+  background: var(--surface-2);
+}
+
+/* The option the arrow keys are on. */
+.exercise-list li.active {
+  background: var(--surface-2);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* While the list is open, leave room so it can scroll above the phone keyboard. */
+body.exercise-list-open main {
+  padding-bottom: 50vh;
+}
+
 /* In-app number pad for the weight and reps fields */
 
 #keypad {
