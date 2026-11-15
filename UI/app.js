@@ -7,6 +7,8 @@ let fb = null; // the firebase.js module, once loaded
 let user = null; // signed-in Firebase user, or null
 let workouts = new Map(); // id -> workout, kept current by a Firestore listener
 let workoutsReady = false;
+let settings = { unit: 'lb' }; // saved in the account; lb until the user chooses otherwise
+let settingsReady = false;
 let stopWatching = null;
 let signInError = null;
 let localCount = 0; // workouts still in this device's old IndexedDB store
@@ -74,8 +76,36 @@ function formatDate(timestamp) {
   });
 }
 
+// ---------- Weight units ----------
+//
+// Every set is stored exactly as it was entered: { weight, unit }. Sets saved before units
+// existed have no unit and are kilograms. Converting only ever happens on the way to the
+// screen; stored values are never rewritten.
+
+const UNITS = ['lb', 'kg'];
+const KG_PER_LB = 0.45359237;
+
+const unitOf = (set) => (set.unit === 'lb' ? 'lb' : 'kg');
+
+function convertWeight(weight, from, to) {
+  if (from === to) {
+    return weight;
+  }
+  return from === 'lb' ? weight * KG_PER_LB : weight / KG_PER_LB;
+}
+
+// One decimal place, without a trailing ".0".
+const roundForDisplay = (weight) => String(Math.round(weight * 10) / 10);
+
+// A set's weight as text in the user's current unit. Shown exactly when it was entered in
+// that unit, rounded when it has to be converted.
+function shownWeight(set) {
+  const from = unitOf(set);
+  return from === settings.unit ? String(set.weight) : roundForDisplay(convertWeight(set.weight, from, settings.unit));
+}
+
 function formatSet(set) {
-  return set.weight > 0 ? `${set.weight} kg × ${set.reps}` : `Bodyweight × ${set.reps}`;
+  return set.weight > 0 ? `${shownWeight(set)} ${settings.unit} × ${set.reps}` : `Bodyweight × ${set.reps}`;
 }
 
 function summary(workout) {
@@ -157,6 +187,7 @@ function cleanWorkout(item) {
           .map((set) => ({
             id: typeof set.id === 'string' && set.id ? set.id : newId(),
             weight: Number.isFinite(set.weight) && set.weight > 0 ? set.weight : 0,
+            unit: unitOf(set), // no unit (older data and backups) means kg
             reps: Math.floor(set.reps),
           })),
       })),
@@ -714,6 +745,50 @@ const repsText = (value) => value.replace(/[^0-9]/g, '');
 
 // ---------- Workout: exercises and sets ----------
 
+// The lb / kg switch, used on the workout screen and in Settings. It changes the saved
+// setting: the unit weights are shown in, and the unit new sets are stored with.
+function setUnit(unit) {
+  const previous = settings.unit;
+  if (unit === previous) {
+    return;
+  }
+  // A weight already typed into the open row was typed in the old unit; carry it across.
+  rememberOpenSetValues();
+  const typed = Number(openSet?.weight);
+  if (openSet && openSet.weight !== '' && Number.isFinite(typed)) {
+    openSet.weight = roundForDisplay(convertWeight(typed, previous, unit));
+    // Put it in the field too: the redraw that follows reads the row's values back from it.
+    const field = view.querySelector('form.add-set')?.elements.weight;
+    if (field) {
+      field.value = openSet.weight;
+    }
+  }
+  settings = { ...settings, unit };
+  fb.saveSettings(user.uid, { unit }).catch(reportSaveError);
+}
+
+function unitToggle(afterChange) {
+  return h(
+    'div',
+    { class: 'unit-toggle', role: 'group', 'aria-label': 'Weight unit' },
+    UNITS.map((unit) =>
+      h(
+        'button',
+        {
+          class: 'unit-option',
+          type: 'button',
+          'aria-pressed': String(settings.unit === unit),
+          onclick: () => {
+            setUnit(unit);
+            afterChange();
+          },
+        },
+        unit
+      )
+    )
+  );
+}
+
 // Which exercise has its "add a set" row open, and what has been typed into it so far.
 // Only one can be open at a time. This lives in memory only (it is never saved to the
 // account), so the row stays open, with its values, when the screen is redrawn after a save.
@@ -754,7 +829,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           onclick: () => {
             openSet = {
               exerciseId: exercise.id,
-              weight: last ? String(last.weight) : '',
+              weight: last ? shownWeight(last) : '',
               reps: last ? String(last.reps) : '',
             };
             redraw(`${card} input[name="weight"]`, true);
@@ -802,17 +877,21 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           'data-exercise': exercise.id,
           onsubmit: (event) => {
             event.preventDefault();
-            const weight = Number(weightInput.value) || 0;
             const reps = Math.floor(Number(repsInput.value));
+            // A weight left exactly as pre-filled is the previous set's weight, so store
+            // that set's own value and unit rather than a rounded conversion of it.
+            const unchanged = last && weightInput.value !== '' && weightInput.value === shownWeight(last);
+            const weight = unchanged ? last.weight : Number(weightInput.value) || 0;
+            const unit = unchanged ? unitOf(last) : settings.unit;
             if (!(reps >= 1) || weight < 0) {
               return;
             }
-            exercise.sets.push({ id: newId(), weight, reps });
+            exercise.sets.push({ id: newId(), weight, unit, reps });
             openSet = null; // back to the "+ Add set" button; the next set is opened by hand
             commit(`${card} .open-set`);
           },
         },
-        h('label', {}, 'Weight (kg)', weightInput),
+        h('label', {}, `Weight (${settings.unit})`, weightInput),
         h('label', {}, 'Reps', repsInput),
         h('button', { class: 'btn' }, 'Add set'),
         h(
@@ -922,9 +1001,14 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
     h('a', { class: 'back', href: '#/' }, '← All workouts'),
     h('h1', {}, workout.name),
     h(
-      'p',
-      { class: 'muted' },
-      `${formatDate(workout.startedAt)} · ${workout.finishedAt ? 'Finished' : 'In progress'} · ${summary(workout)}`
+      'div',
+      { class: 'row workout-meta' },
+      h(
+        'p',
+        { class: 'muted grow' },
+        `${formatDate(workout.startedAt)} · ${workout.finishedAt ? 'Finished' : 'In progress'} · ${summary(workout)}`
+      ),
+      unitToggle(() => redraw())
     ),
     ...exerciseCards,
     addExercise,
@@ -979,9 +1063,16 @@ const BACKUP_FORMAT = 'gym-workouts';
 function exportWorkouts() {
   const backup = {
     format: BACKUP_FORMAT,
-    version: 1,
+    version: 2, // 2 adds a unit on every set, and the unit setting. Version 1 files were all kg.
     exportedAt: new Date().toISOString(),
-    workouts: [...workouts.values()],
+    settings: { unit: settings.unit },
+    workouts: [...workouts.values()].map((workout) => ({
+      ...workout,
+      exercises: workout.exercises.map((exercise) => ({
+        ...exercise,
+        sets: exercise.sets.map((set) => ({ ...set, unit: unitOf(set) })),
+      })),
+    })),
   };
   const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
   const link = h('a', { href: url, download: `gym-workouts-${backup.exportedAt.slice(0, 10)}.json` });
@@ -1044,6 +1135,22 @@ function renderSettings(backupMessage) {
       ),
       h('button', { class: 'btn secondary block', type: 'button', onclick: signOutNow }, 'Sign out')
     ),
+    h('h2', {}, 'Units'),
+    h(
+      'div',
+      { class: 'card units' },
+      h(
+        'div',
+        { class: 'row' },
+        h('strong', { class: 'grow' }, 'Weight unit'),
+        unitToggle(() => renderSettings())
+      ),
+      h(
+        'p',
+        { class: 'muted' },
+        'Weights are shown in this unit and new sets are saved in it. Sets you already logged keep the unit they were entered in and are converted for display.'
+      )
+    ),
     h('h2', {}, 'Backup'),
     h(
       'div',
@@ -1087,7 +1194,7 @@ function route() {
     renderSignedOut();
     return;
   }
-  if (!workoutsReady) {
+  if (!workoutsReady || !settingsReady) {
     renderMessage('Loading your workouts…');
     return;
   }
@@ -1119,6 +1226,8 @@ function onUserChanged(nextUser) {
   stopWatching = null;
   workouts = new Map();
   workoutsReady = false;
+  settings = { unit: 'lb' };
+  settingsReady = false;
   renderHeader();
   route();
   if (!user) {
@@ -1127,7 +1236,7 @@ function onUserChanged(nextUser) {
 
   signInError = null;
   const uid = user.uid;
-  stopWatching = fb.watchWorkouts(
+  const stopWorkouts = fb.watchWorkouts(
     uid,
     (list) => {
       workouts = new Map(list.map((workout) => [workout.id, workout]));
@@ -1151,6 +1260,27 @@ function onUserChanged(nextUser) {
       );
     }
   );
+  const settingsLoaded = (unit) => {
+    const first = !settingsReady;
+    settingsReady = true;
+    const changed = unit !== settings.unit; // false for the echo of a change made here
+    settings = { ...settings, unit };
+    if (first || changed) {
+      route();
+    }
+  };
+  const stopSettings = fb.watchSettings(
+    uid,
+    (saved) => settingsLoaded(saved.unit === 'kg' ? 'kg' : 'lb'), // nothing saved yet means lb
+    (error) => {
+      console.error(error);
+      settingsLoaded(settings.unit); // carry on with what we have
+    }
+  );
+  stopWatching = () => {
+    stopWorkouts();
+    stopSettings();
+  };
   migrateLocalWorkouts(uid);
 }
 
