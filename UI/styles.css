@@ -358,6 +358,14 @@ a.btn {
   min-width: 0;
 }
 
+.add-set .cancel-set {
+  height: 44px;
+}
+
+.open-set {
+  margin-top: 10px;
+}
+
 /* In-app number pad for the weight and reps fields */
 
 #keypad {
@@ -458,6 +466,12 @@ input.pad-active {
   border-color: var(--accent);
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* "Add set" was pressed with nothing usable in the field. */
+input.pad-invalid {
+  border-color: var(--danger);
+  outline-color: var(--danger);
 }
 
 /* While the pad is up, leave room so the last fields can scroll above it. */

@@ -486,11 +486,18 @@ function pressPadKey(key) {
   if (key === 'action') {
     if (isWeight) {
       openPad(field.form.elements.reps);
-    } else {
+    } else if (field.form.checkValidity()) {
       field.form.requestSubmit(); // same as pressing the form's own "Add set"
+    } else {
+      // The browser's own "fill out this field" bubble would sit behind the pad, so mark
+      // the field instead. The mark clears on the next key.
+      field.classList.add('pad-invalid');
+      field.setAttribute('aria-invalid', 'true');
     }
     return;
   }
+  field.classList.remove('pad-invalid');
+  field.removeAttribute('aria-invalid');
 
   let text;
   if (key === 'back') {
@@ -579,6 +586,8 @@ function padInput(attrs, allowed) {
       if (cleaned !== input.value) {
         input.value = cleaned;
       }
+      input.classList.remove('pad-invalid');
+      input.removeAttribute('aria-invalid');
       if (padField === input) {
         padFresh = false;
       }
@@ -595,44 +604,122 @@ const repsText = (value) => value.replace(/[^0-9]/g, '');
 
 // ---------- Workout: exercises and sets ----------
 
+// Which exercise has its "add a set" row open, and what has been typed into it so far.
+// Only one can be open at a time. This lives in memory only (it is never saved to the
+// account), so the row stays open, with its values, when the screen is redrawn after a save.
+let openSet = null; // { exerciseId, weight, reps } or null
+
+function rememberOpenSetValues() {
+  const form = view.querySelector('form.add-set');
+  if (openSet && form?.dataset.exercise === openSet.exerciseId) {
+    openSet.weight = form.elements.weight.value;
+    openSet.reps = form.elements.reps.value;
+  }
+}
+
 function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
+  rememberOpenSetValues();
   closePad();
+  if (openSet && !workout.exercises.some((exercise) => exercise.id === openSet.exerciseId)) {
+    openSet = null; // its exercise was removed
+  }
+
+  const redraw = (nextFocus, withPad = false) => renderWorkout(workout, nextFocus, withPad);
   const commit = (nextFocus, withPad = false) => {
     saveWorkout(workout);
-    renderWorkout(workout, nextFocus, withPad);
+    redraw(nextFocus, withPad);
   };
 
   const exerciseCards = workout.exercises.map((exercise) => {
     const last = exercise.sets[exercise.sets.length - 1];
-    const weightInput = padInput(
-      {
-        name: 'weight',
-        enterkeyhint: 'next',
-        pattern: '[0-9]*[.]?[0-9]*',
-        title: 'A number, for example 62.5',
-        placeholder: '0',
-        value: last ? String(last.weight) : null,
-        // Enter moves on to reps instead of adding the set.
-        onkeydown: (event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            openPad(repsInput);
-          }
+    const card = `.exercise[data-id="${exercise.id}"]`;
+
+    // Closed: just a button. Opening it closes any other exercise's row without saving.
+    const openButton = () =>
+      h(
+        'button',
+        {
+          class: 'btn secondary block open-set',
+          type: 'button',
+          onclick: () => {
+            openSet = {
+              exerciseId: exercise.id,
+              weight: last ? String(last.weight) : '',
+              reps: last ? String(last.reps) : '',
+            };
+            redraw(`${card} input[name="weight"]`, true);
+          },
         },
-      },
-      weightText
-    );
-    const repsInput = padInput(
-      {
-        name: 'reps',
-        enterkeyhint: 'done',
-        pattern: '0*[1-9][0-9]*',
-        title: 'A whole number, 1 or more',
-        required: true,
-        value: last ? String(last.reps) : null,
-      },
-      repsText
-    );
+        '+ Add set'
+      );
+
+    // Open: the weight/reps row, typed into with the in-app number pad.
+    const setRow = () => {
+      const weightInput = padInput(
+        {
+          name: 'weight',
+          enterkeyhint: 'next',
+          pattern: '[0-9]*[.]?[0-9]*',
+          title: 'A number, for example 62.5',
+          placeholder: '0',
+          value: openSet.weight || null,
+          // Enter moves on to reps instead of adding the set.
+          onkeydown: (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              openPad(repsInput);
+            }
+          },
+        },
+        weightText
+      );
+      const repsInput = padInput(
+        {
+          name: 'reps',
+          enterkeyhint: 'done',
+          pattern: '0*[1-9][0-9]*',
+          title: 'A whole number, 1 or more',
+          required: true,
+          value: openSet.reps || null,
+        },
+        repsText
+      );
+
+      return h(
+        'form',
+        {
+          class: 'add-set',
+          'data-exercise': exercise.id,
+          onsubmit: (event) => {
+            event.preventDefault();
+            const weight = Number(weightInput.value) || 0;
+            const reps = Math.floor(Number(repsInput.value));
+            if (!(reps >= 1) || weight < 0) {
+              return;
+            }
+            exercise.sets.push({ id: newId(), weight, reps });
+            openSet = null; // back to the "+ Add set" button; the next set is opened by hand
+            commit(`${card} .open-set`);
+          },
+        },
+        h('label', {}, 'Weight (kg)', weightInput),
+        h('label', {}, 'Reps', repsInput),
+        h('button', { class: 'btn' }, 'Add set'),
+        h(
+          'button',
+          {
+            class: 'icon-btn cancel-set',
+            type: 'button',
+            'aria-label': 'Cancel',
+            onclick: () => {
+              openSet = null;
+              redraw(`${card} .open-set`);
+            },
+          },
+          '×'
+        )
+      );
+    };
 
     return h(
       'section',
@@ -685,25 +772,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
             )
           )
         : h('p', { class: 'muted' }, 'No sets yet.'),
-      h(
-        'form',
-        {
-          class: 'add-set',
-          onsubmit: (event) => {
-            event.preventDefault();
-            const weight = Number(weightInput.value) || 0;
-            const reps = Math.floor(Number(repsInput.value));
-            if (!(reps >= 1) || weight < 0) {
-              return;
-            }
-            exercise.sets.push({ id: newId(), weight, reps });
-            commit(`.exercise[data-id="${exercise.id}"] input[name="reps"]`);
-          },
-        },
-        h('label', {}, 'Weight (kg)', weightInput),
-        h('label', {}, 'Reps', repsInput),
-        h('button', { class: 'btn' }, 'Add set')
-      )
+      openSet?.exerciseId === exercise.id ? setRow() : openButton()
     );
   });
 
@@ -728,7 +797,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
         }
         const exercise = { id: newId(), name, sets: [] };
         workout.exercises.push(exercise);
-        commit(`.exercise[data-id="${exercise.id}"] input[name="weight"]`, true);
+        commit(`.exercise[data-id="${exercise.id}"] .open-set`);
       },
     },
     h(
@@ -784,8 +853,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
     )
   );
 
-  // After adding an exercise the pad opens on its weight field; after adding a set the
-  // reps field keeps focus but the pad stays closed until it is tapped.
+  // "+ Add set" asks for the pad to open on the weight field; any other focus leaves it closed.
   const focusTarget = focusSelector && view.querySelector(focusSelector);
   if (focusTarget && (openPadOnFocus || !isPadField(focusTarget))) {
     focusTarget.focus();
@@ -899,6 +967,7 @@ const onHomeScreen = () => location.hash !== '#/settings' && !location.hash.star
 
 function route() {
   closePad();
+  openSet = null;
   if (!fb) {
     return;
   }
