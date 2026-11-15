@@ -410,15 +410,37 @@ function renderWorkout(workout, focusSelector) {
       name: 'weight',
       type: 'number',
       inputmode: 'decimal',
+      enterkeyhint: 'next',
       min: '0',
       step: 'any',
       placeholder: '0',
       value: last ? String(last.weight) : null,
+      // Enter moves on to reps instead of adding the set.
+      onkeydown: (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          goToReps();
+        }
+      },
+      // The phone keypads have no Enter key; their Done button just closes the keyboard,
+      // which arrives here as losing focus to nothing. Treat that like Enter. Tapping
+      // another field or button (relatedTarget set) is left alone, as is switching apps.
+      onblur: (event) => {
+        if (weightInput.value !== '' && !event.relatedTarget && document.hasFocus() && repsInput.isConnected) {
+          goToReps();
+        }
+      },
     });
+    // Focus reps with its text selected, so typing replaces the pre-filled value.
+    const goToReps = () => {
+      repsInput.focus();
+      repsInput.select();
+    };
     const repsInput = h('input', {
       name: 'reps',
       type: 'number',
       inputmode: 'numeric',
+      enterkeyhint: 'done',
       min: '1',
       step: '1',
       required: true,
