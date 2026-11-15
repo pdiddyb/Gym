@@ -33,6 +33,30 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+// Inline SVG icons, drawn in the current text colour. They are decoration only: the button
+// or link around each one carries the label.
+const ICONS = {
+  // three dots, stacked
+  more:
+    '<circle cx="12" cy="5" r="1.9" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.9" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.9" fill="currentColor" stroke="none"/>',
+  gear:
+    '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  // a keyboard with a down arrow under it
+  keyboardDown:
+    '<rect x="3" y="3.5" width="18" height="11" rx="2"/><path d="M7 7.5h.01M11 7.5h.01M15 7.5h.01M8 11h8"/><path d="M9 18l3 3 3-3"/>',
+  backspace: '<path d="M21 5H9l-6 7 6 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z"/><path d="M17 9.5l-5 5M12 9.5l5 5"/>',
+};
+
+function icon(name) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'icon');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  svg.innerHTML = ICONS[name];
+  return svg;
+}
+
 function newId() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -299,13 +323,76 @@ async function signOutNow() {
 const authSlot = h('span', { id: 'auth', class: 'row' });
 (document.getElementById('header-actions') ?? document.querySelector('.bar')).append(authSlot);
 
+// The round profile button and the small menu under it (name, email, Sign out).
+let account = null; // { wrapper, button, menu } while signed in
+
+function setAccountMenu(open) {
+  if (account) {
+    account.menu.hidden = !open;
+    account.button.setAttribute('aria-expanded', String(open));
+  }
+}
+
+function accountControl() {
+  const name = user.displayName || user.email || 'Account';
+  // Starts as the user's initial; swapped for their Google photo once it has loaded, so a
+  // missing or unreachable photo (for example offline) just leaves the initial.
+  const avatar = h('span', { class: 'avatar' }, name.trim().charAt(0).toUpperCase());
+  if (user.photoURL) {
+    const photo = h('img', { alt: '', referrerpolicy: 'no-referrer' });
+    photo.addEventListener('load', () => avatar.replaceChildren(photo));
+    photo.src = user.photoURL;
+  }
+
+  const menu = h(
+    'div',
+    { class: 'account-menu', id: 'account-menu', role: 'group', 'aria-label': 'Account', hidden: true },
+    h('strong', {}, user.displayName || 'Signed in'),
+    user.email && h('span', { class: 'muted' }, user.email),
+    h('button', { class: 'btn secondary block sign-out', type: 'button', onclick: signOutNow }, 'Sign out')
+  );
+  const button = h(
+    'button',
+    {
+      class: 'avatar-btn',
+      type: 'button',
+      'aria-label': `Account: ${name}`,
+      'aria-expanded': 'false',
+      'aria-controls': 'account-menu',
+      onclick: () => setAccountMenu(menu.hidden),
+    },
+    avatar
+  );
+  account = { wrapper: h('span', { class: 'account' }, button, menu), button, menu };
+  return account.wrapper;
+}
+
+// Tapping anywhere else, or Escape, closes the account menu.
+document.addEventListener('pointerdown', (event) => {
+  if (account && !account.wrapper.contains(event.target)) {
+    setAccountMenu(false);
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && account && !account.menu.hidden) {
+    setAccountMenu(false);
+    account.button.focus();
+  }
+});
+
 function renderHeader() {
+  account = null;
   if (!fb) {
     authSlot.replaceChildren();
   } else if (user) {
     authSlot.replaceChildren(
-      h('a', { class: 'btn small secondary settings-link', href: '#/settings' }, 'Settings'),
-      h('button', { class: 'btn small secondary sign-out', type: 'button', onclick: signOutNow }, 'Sign out')
+      h(
+        'a',
+        { class: 'icon-btn history-link', href: '#/history', 'aria-label': 'Workout history', title: 'Workout history' },
+        icon('more')
+      ),
+      h('a', { class: 'icon-btn settings-link', href: '#/settings', 'aria-label': 'Settings', title: 'Settings' }, icon('gear')),
+      accountControl()
     );
   } else {
     authSlot.replaceChildren(h('button', { class: 'btn small sign-in', type: 'button', onclick: startGoogleSignIn }, 'Sign in'));
@@ -337,10 +424,27 @@ function renderSignedOut() {
   );
 }
 
-// ---------- Home: start a workout, see past ones ----------
+// ---------- Home: start a workout, carry on with an unfinished one ----------
+
+function workoutLink(workout) {
+  return h(
+    'a',
+    { class: 'card workout-link', href: `#/workout/${workout.id}` },
+    h(
+      'div',
+      { class: 'row' },
+      h('strong', { class: 'grow' }, workout.name),
+      !workout.finishedAt && h('span', { class: 'badge' }, 'In progress')
+    ),
+    h('span', { class: 'muted' }, `${formatDate(workout.startedAt)} · ${summary(workout)}`)
+  );
+}
+
+const newestFirst = () => [...workouts.values()].sort((a, b) => b.startedAt - a.startedAt);
 
 function renderHome() {
-  const list = [...workouts.values()].sort((a, b) => b.startedAt - a.startedAt);
+  // Finished workouts live on the History screen (the three-dot button in the header).
+  const unfinished = newestFirst().filter((workout) => !workout.finishedAt);
 
   // The list can refresh while a name is being typed (a change arriving from another device).
   const previous = view.querySelector('.new-workout input');
@@ -374,26 +478,25 @@ function renderHome() {
     h('div', { class: 'row' }, h('div', { class: 'grow' }, nameInput), h('button', { class: 'btn' }, 'Start'))
   );
 
-  const historyItems = list.length
-    ? list.map((workout) =>
-        h(
-          'a',
-          { class: 'card workout-link', href: `#/workout/${workout.id}` },
-          h(
-            'div',
-            { class: 'row' },
-            h('strong', { class: 'grow' }, workout.name),
-            !workout.finishedAt && h('span', { class: 'badge' }, 'In progress')
-          ),
-          h('span', { class: 'muted' }, `${formatDate(workout.startedAt)} · ${summary(workout)}`)
-        )
-      )
-    : [h('p', { class: 'muted' }, 'No workouts yet. Name one above to start logging.')];
-
-  view.replaceChildren(h('h2', {}, 'New workout'), form, h('h2', {}, 'History'), ...historyItems);
+  view.replaceChildren(
+    h('h2', {}, 'New workout'),
+    form,
+    ...(unfinished.length ? [h('h2', {}, 'In progress'), ...unfinished.map(workoutLink)] : [])
+  );
   if (refocus) {
     nameInput.focus();
   }
+}
+
+// ---------- History: every workout, newest first ----------
+
+function renderHistory() {
+  const list = newestFirst();
+  view.replaceChildren(
+    h('a', { class: 'back', href: '#/' }, '← Back'),
+    h('h1', {}, 'History'),
+    ...(list.length ? list.map(workoutLink) : [h('p', { class: 'muted' }, 'No workouts yet.')])
+  );
 }
 
 // ---------- In-app number pad (replaces the phone keyboard for weight and reps) ----------
@@ -419,7 +522,8 @@ const pad = h(
     ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => padKey(digit, digit)),
     padPoint,
     padKey('0', '0'),
-    padKey('⌫', 'back', { 'aria-label': 'Backspace' }),
+    padKey(icon('backspace'), 'back', { 'aria-label': 'Backspace' }),
+    padKey(icon('keyboardDown'), 'hide', { class: 'pad-key pad-hide', 'aria-label': 'Hide keypad' }),
     padAction
   )
 );
@@ -483,6 +587,12 @@ function pressPadKey(key) {
   }
   const isWeight = field.name === 'weight';
 
+  if (key === 'hide') {
+    // Just puts the pad away. What has been typed stays in the row, unsaved.
+    closePad();
+    field.blur();
+    return;
+  }
   if (key === 'action') {
     if (isWeight) {
       openPad(field.form.elements.reps);
@@ -731,7 +841,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
         h(
           'button',
           {
-            class: 'icon-btn',
+            class: 'icon-btn destructive',
             type: 'button',
             'aria-label': `Remove ${exercise.name}`,
             onclick: () => {
@@ -758,7 +868,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
                 h(
                   'button',
                   {
-                    class: 'icon-btn',
+                    class: 'icon-btn destructive',
                     type: 'button',
                     'aria-label': `Remove set ${index + 1}`,
                     onclick: () => {
@@ -963,10 +1073,12 @@ function renderSettings(backupMessage) {
 
 // ---------- Routing ----------
 
+// The home and history screens are lists that are safe to redraw when data changes.
 const onHomeScreen = () => location.hash !== '#/settings' && !location.hash.startsWith('#/workout/');
 
 function route() {
   closePad();
+  setAccountMenu(false);
   openSet = null;
   if (!fb) {
     return;
@@ -982,6 +1094,10 @@ function route() {
   if (location.hash === '#/settings') {
     renderSettings();
     window.scrollTo(0, 0);
+    return;
+  }
+  if (location.hash === '#/history') {
+    renderHistory();
     return;
   }
   const match = location.hash.match(/^#\/workout\/(.+)$/);
