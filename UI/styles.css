@@ -426,6 +426,106 @@ h1 + p {
   font-weight: 600;
 }
 
+.start-workout {
+  min-height: 56px;
+  margin-top: 8px;
+  font-size: 1.1rem;
+}
+
+/* A saved outline: the whole card is the button that starts a workout from it. */
+.outline-start {
+  display: block;
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.outline-start strong,
+.outline-start .muted {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.outline-start strong {
+  font-size: 1.05rem;
+}
+
+/* Elapsed time at the top of a workout in progress */
+.timer {
+  margin-bottom: 4px;
+  font-size: 2.25rem;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Workout completed */
+
+.done-when {
+  margin: 4px 0 16px;
+}
+
+.total-time span,
+.total-time strong {
+  display: block;
+}
+
+.total-time strong {
+  font-size: 2rem;
+  line-height: 1.2;
+}
+
+.improved {
+  list-style: none;
+  padding: 4px 14px;
+}
+
+.improved li {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.improved li:last-child {
+  border-bottom: 0;
+}
+
+.improved .badge {
+  display: inline-block;
+  margin-left: 8px;
+}
+
+.save-outline {
+  margin-bottom: 0;
+}
+
+.save-outline p {
+  margin: 0 0 12px;
+  overflow-wrap: anywhere;
+}
+
+.actions .status {
+  margin: 0;
+}
+
+/* Outlines in Settings */
+
+.outline-edit {
+  margin-bottom: 12px;
+}
+
+.outline-edit p {
+  margin: 10px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.exercise .planned {
+  margin: 8px 0 0;
+}
+
 /* lb / kg switch */
 
 .unit-toggle {

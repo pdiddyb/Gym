@@ -1,5 +1,5 @@
 // Firebase wiring: Google sign-in (Auth) and per-user storage (Firestore) for workouts,
-// settings and the exercise library.
+// settings, outlines and the exercise library.
 // The SDK is loaded straight from Google's CDN; there is no build step.
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js';
@@ -130,6 +130,27 @@ export async function serverWorkoutIds(uid) {
 export async function serverWorkouts(uid) {
   const snapshot = await getDocsFromServer(workoutsOf(uid));
   return snapshot.docs.map((item) => ({ ...item.data(), id: item.id }));
+}
+
+// ---------- Outlines: users/{uid}/outlines/{outlineId} ----------
+
+const outlineRef = (uid, id) => doc(db, 'users', uid, 'outlines', id);
+
+// Calls onData with every outline now and again after every change. Works offline.
+export function watchOutlines(uid, onData, onError) {
+  return onSnapshot(
+    collection(db, 'users', uid, 'outlines'),
+    (snapshot) => onData(snapshot.docs.map((item) => ({ ...item.data(), id: item.id }))),
+    onError
+  );
+}
+
+export function saveOutline(uid, outline) {
+  return setDoc(outlineRef(uid, outline.id), withoutId(outline));
+}
+
+export function deleteOutline(uid, id) {
+  return deleteDoc(outlineRef(uid, id));
 }
 
 // ---------- Exercise library: users/{uid}/exercises/{exerciseId} ----------

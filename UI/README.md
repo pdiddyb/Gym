@@ -4,7 +4,7 @@ Vanilla JavaScript Progressive Web App. No build step: these files are served as
 
 - `index.html` entry page
 - `styles.css` styling
-- `app.js` screens (sign-in, workout list, workout, settings with backup export/import), routing, Google sign-in redirect, one-time move of old device-only workouts into the account
+- `app.js` screens (sign-in, home, history, workout, workout completed, settings with outlines and backup export/import), routing, Google sign-in redirect, one-time move of old device-only workouts into the account
 - `firebase.js` Firebase setup: loads the SDK from Google's CDN, Auth, Firestore with offline persistence, and the workout read/write functions
 - `service-worker.js` offline cache for the app's own files only; Firebase scripts and API calls are never cached by it (bump `CACHE_NAME` when changing assets)
 - `manifest.webmanifest` PWA manifest
@@ -12,7 +12,12 @@ Vanilla JavaScript Progressive Web App. No build step: these files are served as
 
 Data lives in Firestore under `users/{uid}/`:
 
-- `workouts/{workoutId}` the workouts
+- `workouts/{workoutId}` the workouts. Each has `startedAt` and `finishedAt` (null while in
+  progress); the timer and total time come from those. Workouts are labelled by their start date
+  and time; ones made when workouts had titles keep a `name` and show it.
+- `outlines/{outlineId}` saved outlines: `{ name, createdAt, exercises: [{ name, sets }] }`, the
+  exercise names and set counts of a finished workout, with no weights. A workout can be started
+  from one.
 - `settings/preferences` weight unit and other choices
 - `exercises/{exerciseId}` the exercise library: one entry per exercise that is in any workout,
   with its last and heaviest set. It is worked out from the workouts (and kept up to date as
