@@ -104,6 +104,21 @@ export function saveWorkouts(uid, workouts) {
   return Promise.all(commits);
 }
 
+// ---------- Settings: users/{uid}/settings/preferences ----------
+
+const settingsRef = (uid) => doc(db, 'users', uid, 'settings', 'preferences');
+
+// Calls onData with the saved settings ({} if none yet) now and after every change.
+export function watchSettings(uid, onData, onError) {
+  return onSnapshot(settingsRef(uid), (snapshot) => onData(snapshot.exists() ? snapshot.data() : {}), onError);
+}
+
+// Merges the given fields into the saved settings. Like the workout writes, the promise
+// resolves only when the server has accepted it.
+export function saveSettings(uid, changes) {
+  return setDoc(settingsRef(uid), changes, { merge: true });
+}
+
 // Ids of the workouts the server has for this user. Rejects when offline.
 export async function serverWorkoutIds(uid) {
   const snapshot = await getDocsFromServer(workoutsOf(uid));

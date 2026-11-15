@@ -226,8 +226,9 @@ a.btn {
   pointer-events: none;
 }
 
-/* Profile picture button and its menu */
-.account {
+/* Profile picture button and its menu (scoped to the header: the Settings screen has an
+   "account" card of its own) */
+#auth .account {
   position: relative;
   display: flex;
 }
@@ -423,6 +424,54 @@ h1 + p {
   color: var(--text);
   font-size: 0.75rem;
   font-weight: 600;
+}
+
+/* lb / kg switch */
+
+.unit-toggle {
+  display: inline-flex;
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--control);
+  border-radius: 8px;
+}
+
+.unit-option {
+  min-width: 48px;
+  min-height: 44px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.unit-option[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+/* The switch clips its children, so draw the focus ring inside the button. */
+.unit-option:focus-visible {
+  outline-offset: -4px;
+}
+
+.unit-option[aria-pressed='true']:focus-visible {
+  outline-color: var(--accent-text);
+}
+
+.workout-meta {
+  margin: 8px 0 14px;
+}
+
+.workout-meta p {
+  margin: 0;
+}
+
+.units p {
+  margin: 12px 0 0;
 }
 
 /* Workout */
