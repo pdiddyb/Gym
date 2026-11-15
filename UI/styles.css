@@ -147,6 +147,63 @@ label input {
   margin: 12px 0 0;
 }
 
+a.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+#header-actions,
+#auth {
+  gap: 8px;
+}
+
+#notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 528px;
+  margin: 12px auto 0;
+  padding: 8px 8px 8px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+#notice[hidden] {
+  display: none;
+}
+
+#notice span {
+  flex: 1;
+}
+
+#notice.error {
+  border-color: var(--danger);
+}
+
+@media (max-width: 560px) {
+  #notice {
+    margin-left: 16px;
+    margin-right: 16px;
+  }
+}
+
+.signin {
+  margin-top: 16px;
+}
+
+.signin p,
+.account p {
+  margin: 8px 0 14px;
+}
+
+.signin .local-note,
+.signin .error {
+  margin: 14px 0 0;
+}
+
 .btn.small {
   min-height: 36px;
   padding: 4px 12px;

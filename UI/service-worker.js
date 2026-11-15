@@ -1,9 +1,14 @@
-const CACHE_NAME = 'gym-pwa-v3';
+const CACHE_NAME = 'gym-pwa-v4';
+
+// Only the app's own files listed here are ever cached or served from the cache.
+// Everything else is left to the browser and goes to the network untouched: the Firebase
+// SDK scripts on www.gstatic.com, and all Firebase Auth, Firestore and Google sign-in calls.
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
   './app.js',
+  './firebase.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -30,8 +35,12 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Not calling respondWith() means the service worker stays out of the way entirely.
   const requestUrl = new URL(event.request.url);
-  if (requestUrl.origin !== self.location.origin || !PRECACHE_PATHS.has(requestUrl.pathname)) {
+  if (requestUrl.origin !== self.location.origin) {
+    return; // Firebase CDN scripts and every Firebase/Google API call.
+  }
+  if (!PRECACHE_PATHS.has(requestUrl.pathname)) {
     return;
   }
 
