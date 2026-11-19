@@ -135,11 +135,11 @@ function convertWeight(weight, from, to) {
 // One decimal place, without a trailing ".0".
 const roundForDisplay = (weight) => String(Math.round(weight * 10) / 10);
 
-// A set's weight as text in the user's current unit. Shown exactly when it was entered in
-// that unit, rounded when it has to be converted.
-function shownWeight(set) {
+// A set's weight as text in the user's current unit (or the unit given). Shown exactly when
+// it was entered in that unit, rounded when it has to be converted.
+function shownWeight(set, unit = settings.unit) {
   const from = unitOf(set);
-  return from === settings.unit ? String(set.weight) : roundForDisplay(convertWeight(set.weight, from, settings.unit));
+  return from === unit ? String(set.weight) : roundForDisplay(convertWeight(set.weight, from, unit));
 }
 
 function formatSet(set) {
@@ -243,11 +243,20 @@ function cleanOutline(item) {
 // users/{uid}/exercises has one entry for each exercise that is in any of the user's
 // workouts: { name, key, lastUsedAt, last, max }. `last` is the most recent set and `max`
 // the heaviest one, each { weight, unit, reps, date } exactly as the set was entered, or
-// null when the exercise has no sets yet. Sets carry no time of their own, so `date` is
-// the start of the workout the set is in.
+// null when the exercise has no sets yet. `date` is the start of the workout the set is in.
 //
 // `last` and `max` are always worked out again from the workouts rather than adjusted, so
 // deleting a set (even the heaviest one) leaves them correct.
+//
+// Hand edits from the Exercise data page are kept in `manual`: { max, last }, each
+// { at, set } where `at` is when the edit was made and `set` is { weight, unit, reps }, or
+// null when the stat was cleared. An edited stat starts from that set and only sets logged
+// after `at` count towards it: a heavier one replaces an edited max, and any one replaces an
+// edited last. The record made from an edited set carries `edited: true`, with `at` as its
+// date. Automatic updates never write `manual` (see autoFields), so they can't undo an edit.
+//
+// `hidden: true` takes an exercise out of the suggestions and the Exercise data list until it
+// is used in a workout again.
 
 // Names that differ only in case or spacing are the same exercise.
 const exerciseKey = (name) => String(name ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -265,9 +274,32 @@ const setInKg = (set) => convertWeight(set.weight, unitOf(set), 'kg');
 // Anything beats no set at all.
 const beats = (a, b) => !b || setInKg(a) > setInKg(b) || (setInKg(a) === setInKg(b) && a.reps > b.reps);
 
+// The hand edits on a library entry, checked: { max, last }, each { at, set } or null where
+// that stat has not been edited. `set` is { weight, unit, reps }, or null for a cleared stat.
+function manualEdits(entry) {
+  const part = (value) => {
+    if (!value || !Number.isFinite(value.at)) {
+      return null;
+    }
+    const set = value.set;
+    const usable = set && Number.isFinite(set.weight) && set.weight >= 0 && Number.isInteger(set.reps) && set.reps >= 1;
+    return { at: value.at, set: usable ? { weight: set.weight, unit: unitOf(set), reps: set.reps } : null };
+  };
+  return { max: part(entry?.manual?.max), last: part(entry?.manual?.last) };
+}
+
+// The library record for a hand-edited stat: its set, dated when the edit was made.
+const editedRecord = (part) => (part?.set ? { ...part.set, date: part.at, edited: true } : null);
+
+const hasEditedSet = (entry) => {
+  const manual = manualEdits(entry);
+  return Boolean(manual.max?.set || manual.last?.set);
+};
+
 // Reads the given workouts and returns key -> { name, lastUsedAt, last, max } for every
-// exercise in them, or only for the keys in `wanted`.
-function deriveLibrary(list, wanted = null) {
+// exercise in them, or only for the keys in `wanted`. The hand edits of the matching
+// entries in `entries` are applied (see the top of this section).
+function deriveLibrary(list, wanted = null, entries = library) {
   const found = new Map();
   const oldestFirst = [...list].sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   for (const workout of oldestFirst) {
@@ -279,7 +311,9 @@ function deriveLibrary(list, wanted = null) {
       }
       let entry = found.get(key);
       if (!entry) {
-        entry = { name: '', lastUsedAt: 0, last: null, max: null };
+        // An edited stat starts from the edited set; an unedited one from nothing.
+        const manual = manualEdits(entries.get(key));
+        entry = { name: '', lastUsedAt: 0, last: editedRecord(manual.last), max: editedRecord(manual.max), manual };
         found.set(key, entry);
       }
       // Later workouts overwrite earlier ones, so these end up as the most recent.
@@ -290,9 +324,14 @@ function deriveLibrary(list, wanted = null) {
           continue;
         }
         const record = { weight: set.weight, unit: unitOf(set), reps: set.reps, date };
-        entry.last = record;
+        // When the set was logged. Sets saved before that was recorded count as logged
+        // when their workout started.
+        const loggedAt = Number.isFinite(set.at) ? set.at : date;
+        if (!entry.manual.last || loggedAt > entry.manual.last.at) {
+          entry.last = record;
+        }
         // Heaviest wins; at the same weight, more reps wins; a tie keeps the earlier set.
-        if (beats(record, entry.max)) {
+        if ((!entry.manual.max || loggedAt > entry.manual.max.at) && beats(record, entry.max)) {
           entry.max = record;
         }
       }
@@ -301,9 +340,11 @@ function deriveLibrary(list, wanted = null) {
   return found;
 }
 
-// The entry to store for a key. An entry that already exists keeps its id and its name.
+// The entry to keep for a key. An entry that already exists keeps its id, its name, its
+// hand edits and whether it is hidden, unless it is being used now, which brings it back.
 function libraryEntry(key, found, existing, usedNow = false) {
-  return {
+  const entry = {
+    ...existing,
     id: existing?.id ?? exerciseDocId(key),
     name: existing?.name ?? found.name,
     key,
@@ -311,14 +352,32 @@ function libraryEntry(key, found, existing, usedNow = false) {
     last: found.last,
     max: found.max,
   };
+  if (usedNow && entry.hidden) {
+    entry.hidden = false;
+  }
+  return entry;
+}
+
+// The fields that the automatic updates (syncLibrary and buildLibrary) write. `manual` is
+// never among them, and `hidden` only when using the exercise again has just cleared it.
+function autoFields(entry, existing) {
+  const fields = { id: entry.id, name: entry.name, key: entry.key, lastUsedAt: entry.lastUsedAt, last: entry.last, max: entry.max };
+  if (existing?.hidden && !entry.hidden) {
+    fields.hidden = false;
+  }
+  return fields;
 }
 
 const sameRecord = (a, b) =>
-  a === b || Boolean(a && b && a.weight === b.weight && a.unit === b.unit && a.reps === b.reps && a.date === b.date);
+  a === b ||
+  Boolean(
+    a && b && a.weight === b.weight && a.unit === b.unit && a.reps === b.reps && a.date === b.date && Boolean(a.edited) === Boolean(b.edited)
+  );
 
 // Brings the library entries for these exercise names in line with the workouts as they
 // are now: creates the missing ones, updates last/max, and removes an entry whose exercise
-// is no longer in any workout. Only entries that actually changed are written.
+// is no longer in any workout (unless it has a hand-entered set, which is kept). Only
+// entries that actually changed are written.
 function syncLibrary(names, usedNames = []) {
   const keys = new Set(names.map(exerciseKey).filter(Boolean));
   if (!keys.size) {
@@ -330,22 +389,25 @@ function syncLibrary(names, usedNames = []) {
   const removedIds = [];
   for (const key of keys) {
     const existing = library.get(key);
-    if (!found.has(key)) {
+    if (!found.has(key) && !hasEditedSet(existing)) {
       if (existing) {
         library.delete(key);
         removedIds.push(existing.id);
       }
       continue;
     }
-    const entry = libraryEntry(key, found.get(key), existing, usedKeys.has(key));
+    // In no workout any more, but with a hand-entered set: the edits are all there is.
+    const stats = found.get(key) ?? { name: existing.name, lastUsedAt: 0, ...editedStats(existing) };
+    const entry = libraryEntry(key, stats, existing, usedKeys.has(key));
     const unchanged =
       existing &&
       existing.lastUsedAt === entry.lastUsedAt &&
       sameRecord(existing.last, entry.last) &&
-      sameRecord(existing.max, entry.max);
+      sameRecord(existing.max, entry.max) &&
+      Boolean(existing.hidden) === Boolean(entry.hidden);
     if (!unchanged) {
       library.set(key, entry);
-      saves.push(entry);
+      saves.push(autoFields(entry, existing));
     }
   }
   if (saves.length || removedIds.length) {
@@ -353,17 +415,31 @@ function syncLibrary(names, usedNames = []) {
   }
 }
 
+// { last, max } from an entry's hand edits alone.
+function editedStats(entry) {
+  const manual = manualEdits(entry);
+  return { last: editedRecord(manual.last), max: editedRecord(manual.max) };
+}
+
 // Runs once per account (settings.libraryBuilt records that it has): fills the library
-// from every workout the account already has. It reads the workouts from the server so a
-// device with an incomplete offline copy can't build a partial library; with no connection
-// it does nothing and runs again on the next launch. Running it twice is harmless.
+// from every workout the account already has. It reads the workouts and the library from
+// the server so a device with an incomplete offline copy can't build a partial library or
+// miss a hand edit; with no connection it does nothing and runs again on the next launch.
+// It never writes `manual` or `hidden`, and running it twice is harmless.
 async function buildLibrary(uid) {
   try {
-    const found = deriveLibrary(await fb.serverWorkouts(uid));
-    const known = user?.uid === uid ? library : new Map();
+    const [list, stored] = await Promise.all([fb.serverWorkouts(uid), fb.serverExercises(uid)]);
+    const known = new Map();
+    for (const item of stored) {
+      const key = typeof item.name === 'string' ? exerciseKey(item.name) : '';
+      if (key) {
+        known.set(key, { ...item, key });
+      }
+    }
+    const found = deriveLibrary(list, null, known);
     await fb.saveExercises(
       uid,
-      [...found].map(([key, entry]) => libraryEntry(key, entry, known.get(key)))
+      [...found].map(([key, entry]) => autoFields(libraryEntry(key, entry, known.get(key)), known.get(key)))
     );
     await fb.saveSettings(uid, { libraryBuilt: true });
   } catch (error) {
@@ -393,12 +469,19 @@ function cleanWorkout(item) {
           name: text60(exercise.name),
           sets: (Array.isArray(exercise.sets) ? exercise.sets : [])
             .filter((set) => set && Number.isFinite(set.reps) && set.reps >= 1)
-            .map((set) => ({
-              id: typeof set.id === 'string' && set.id ? set.id : newId(),
-              weight: Number.isFinite(set.weight) && set.weight > 0 ? set.weight : 0,
-              unit: unitOf(set), // no unit (older data and backups) means kg
-              reps: Math.floor(set.reps),
-            })),
+            .map((set) => {
+              const cleanedSet = {
+                id: typeof set.id === 'string' && set.id ? set.id : newId(),
+                weight: Number.isFinite(set.weight) && set.weight > 0 ? set.weight : 0,
+                unit: unitOf(set), // no unit (older data and backups) means kg
+                reps: Math.floor(set.reps),
+              };
+              // When the set was logged; sets from before that was recorded have no time.
+              if (Number.isFinite(set.at) && set.at > 0) {
+                cleanedSet.at = set.at;
+              }
+              return cleanedSet;
+            }),
         };
         // Only exercises that came from an outline have this.
         if (Number.isInteger(exercise.plannedSets) && exercise.plannedSets > 0) {
@@ -572,22 +655,177 @@ async function signOutNow() {
   location.hash = '#/';
 }
 
+// ---------- Dropdown menus ----------
+//
+// One component for every menu that drops down from a button: the header's ⋮ and profile
+// menus, and the menu on each exercise of the Exercise data page. It follows the ARIA menu
+// button pattern (the button has aria-haspopup and aria-expanded; the menu is role="menu"
+// with role="menuitem" options):
+//   - Tapping the button opens the menu; tapping it again closes it.
+//   - Only one menu is open at a time: opening one closes any other.
+//   - Tapping outside it, Escape, Tab or choosing an option closes it.
+//   - Up and Down move through the options (round from the last to the first), Home and End
+//     go to the first and last; on the button, Down or Up opens the menu at the first or
+//     last option.
+//   - Opening moves focus to the first option. Closing from inside (Escape, an option, the
+//     button) puts focus back on the button; a tap elsewhere leaves focus where it lands.
+
+let openMenu = null; // the dropdown whose menu is showing, or null
+let menuCount = 0; // for unique element ids
+
+// `button` is the button that opens the menu. `items` are { label, onSelect, disabled,
+// destructive }. `head` is shown above the options, outside the menu itself, and names it.
+// Returns { element, button, close, place, contains }; `element` holds the button and menu.
+function dropdown(button, items, { head = null, className = '' } = {}) {
+  const id = `menu-${++menuCount}`;
+  button.id ||= `${id}-button`;
+
+  const options = items.map((item) =>
+    h(
+      'button',
+      {
+        class: item.destructive ? 'menu-item destructive' : 'menu-item',
+        type: 'button',
+        role: 'menuitem',
+        tabindex: '-1',
+        disabled: Boolean(item.disabled),
+        onclick: () => {
+          close(true);
+          item.onSelect();
+        },
+      },
+      item.label
+    )
+  );
+  const headId = head ? `${id}-head` : null;
+  const menu = h('div', { class: 'menu', id, role: 'menu', 'aria-labelledby': headId ?? button.id }, options);
+  const panel = h('div', { class: 'menu-panel', hidden: true }, head && h('div', { class: 'menu-head', id: headId }, head), menu);
+  const element = h('div', { class: className ? `dropdown ${className}` : 'dropdown' }, button, panel);
+
+  const usable = () => options.filter((option) => !option.disabled);
+
+  // Under the button, lined up with its right edge; above it when there isn't room below
+  // but there is above, and nudged right if it would run off the left of the screen.
+  function place() {
+    panel.classList.remove('above');
+    panel.style.removeProperty('transform');
+    const rect = panel.getBoundingClientRect();
+    if (rect.bottom > document.documentElement.clientHeight - 8 && button.getBoundingClientRect().top - rect.height - 12 > 0) {
+      panel.classList.add('above');
+    }
+    const left = panel.getBoundingClientRect().left;
+    if (left < 8) {
+      panel.style.transform = `translateX(${8 - left}px)`;
+    }
+  }
+
+  function open(at = 'first') {
+    if (openMenu && openMenu !== api) {
+      openMenu.close(false);
+    }
+    panel.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    openMenu = api;
+    place();
+    const list = usable();
+    (at === 'last' ? list[list.length - 1] : list[0])?.focus();
+  }
+
+  function close(returnFocus) {
+    if (openMenu === api) {
+      openMenu = null;
+    }
+    if (panel.hidden) {
+      return;
+    }
+    panel.hidden = true;
+    button.setAttribute('aria-expanded', 'false');
+    if (returnFocus && button.isConnected) {
+      button.focus();
+    }
+  }
+
+  button.setAttribute('aria-haspopup', 'true');
+  button.setAttribute('aria-expanded', 'false');
+  button.setAttribute('aria-controls', id);
+  button.addEventListener('click', () => (panel.hidden ? open() : close(true)));
+  button.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      open(event.key === 'ArrowUp' ? 'last' : 'first');
+    }
+  });
+  menu.addEventListener('keydown', (event) => {
+    const list = usable();
+    const index = list.indexOf(document.activeElement);
+    const step = (delta) => (index < 0 ? list[delta > 0 ? 0 : list.length - 1] : list[(index + delta + list.length) % list.length]);
+    let next = null;
+    if (event.key === 'ArrowDown') {
+      next = step(1);
+    } else if (event.key === 'ArrowUp') {
+      next = step(-1);
+    } else if (event.key === 'Home') {
+      next = list[0];
+    } else if (event.key === 'End') {
+      next = list[list.length - 1];
+    } else if (event.key === 'Tab') {
+      // Back to the button without stopping the Tab, so focus moves on from the button.
+      close(true);
+      return;
+    }
+    if (next) {
+      event.preventDefault();
+      next.focus();
+    }
+  });
+
+  const api = { element, button, close, place, contains: (node) => element.contains(node) };
+  return api;
+}
+
+function closeMenus() {
+  openMenu?.close(false);
+}
+
+// A tap anywhere outside the open menu and its button closes it. Capture, so nothing on the
+// page can keep the tap from being seen.
+document.addEventListener('pointerdown', (event) => {
+  if (openMenu && !openMenu.contains(event.target)) {
+    openMenu.close(false);
+  }
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') {
+    return;
+  }
+  if (openMenu) {
+    openMenu.close(true);
+  } else if (location.hash === '#/settings' && !event.target.closest?.('input, textarea, select')) {
+    // Settings is what the gear opens, and closes like the menus do, back to the gear.
+    toggleSettings();
+    settingsButton?.focus();
+  }
+});
+window.addEventListener('resize', () => openMenu?.place());
+
 // ---------- Header ----------
 
 const authSlot = h('span', { id: 'auth', class: 'row' });
 (document.getElementById('header-actions') ?? document.querySelector('.bar')).append(authSlot);
 
-// The round profile button and the small menu under it (name, email, Sign out).
-let account = null; // { wrapper, button, menu } while signed in
+let settingsButton = null; // the gear, while signed in
 
-function setAccountMenu(open) {
-  if (account) {
-    account.menu.hidden = !open;
-    account.button.setAttribute('aria-expanded', String(open));
-  }
+// ⋮: the other screens.
+function moreMenu() {
+  const button = h('button', { class: 'icon-btn more-btn', type: 'button', 'aria-label': 'More options', title: 'More options' }, icon('more'));
+  return dropdown(button, [
+    { label: 'Workout history', onSelect: () => (location.hash = '#/history') },
+    { label: 'Exercise data', onSelect: () => (location.hash = '#/exercises') },
+  ]);
 }
 
-function accountControl() {
+// The round profile button: name, email and Sign out.
+function accountMenu() {
   const name = user.displayName || user.email || 'Account';
   // Starts as the user's initial; swapped for their Google photo once it has loaded, so a
   // missing or unreachable photo (for example offline) just leaves the initial.
@@ -597,57 +835,49 @@ function accountControl() {
     photo.addEventListener('load', () => avatar.replaceChildren(photo));
     photo.src = user.photoURL;
   }
-
-  const menu = h(
-    'div',
-    { class: 'account-menu', id: 'account-menu', role: 'group', 'aria-label': 'Account', hidden: true },
-    h('strong', {}, user.displayName || 'Signed in'),
-    user.email && h('span', { class: 'muted' }, user.email),
-    h('button', { class: 'btn secondary block sign-out', type: 'button', onclick: signOutNow }, 'Sign out')
-  );
-  const button = h(
-    'button',
-    {
-      class: 'avatar-btn',
-      type: 'button',
-      'aria-label': `Account: ${name}`,
-      'aria-expanded': 'false',
-      'aria-controls': 'account-menu',
-      onclick: () => setAccountMenu(menu.hidden),
-    },
-    avatar
-  );
-  account = { wrapper: h('span', { class: 'account' }, button, menu), button, menu };
-  return account.wrapper;
+  const button = h('button', { class: 'avatar-btn', type: 'button', 'aria-label': `Account: ${name}` }, avatar);
+  return dropdown(button, [{ label: 'Sign out', onSelect: signOutNow }], {
+    head: [h('strong', {}, user.displayName || 'Signed in'), user.email && h('span', { class: 'muted' }, user.email)],
+    className: 'account-dropdown',
+  });
 }
 
-// Tapping anywhere else, or Escape, closes the account menu.
-document.addEventListener('pointerdown', (event) => {
-  if (account && !account.wrapper.contains(event.target)) {
-    setAccountMenu(false);
+// The gear opens Settings, which has too much in it for a dropdown (outline renaming, the
+// backup file), and pressing it again closes Settings and goes back to the screen it was
+// opened from. That is a step back in the browser history, the same as the Back button,
+// when the gear opened it; Settings opened any other way (a bookmark, say) goes home.
+function toggleSettings() {
+  closeMenus();
+  if (location.hash === '#/settings') {
+    if (history.state?.settingsFromApp) {
+      history.back();
+    } else {
+      location.replace('#/');
+    }
+    return;
   }
-});
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && account && !account.menu.hidden) {
-    setAccountMenu(false);
-    account.button.focus();
-  }
-});
+  location.hash = '#/settings';
+  history.replaceState({ settingsFromApp: true }, '');
+}
+
+// Shows the gear as pressed while Settings is open.
+function updateHeaderState() {
+  settingsButton?.setAttribute('aria-pressed', String(location.hash === '#/settings'));
+}
 
 function renderHeader() {
-  account = null;
+  closeMenus();
+  settingsButton = null;
   if (!fb) {
     authSlot.replaceChildren();
   } else if (user) {
-    authSlot.replaceChildren(
-      h(
-        'a',
-        { class: 'icon-btn history-link', href: '#/history', 'aria-label': 'Workout history', title: 'Workout history' },
-        icon('more')
-      ),
-      h('a', { class: 'icon-btn settings-link', href: '#/settings', 'aria-label': 'Settings', title: 'Settings' }, icon('gear')),
-      accountControl()
+    settingsButton = h(
+      'button',
+      { class: 'icon-btn settings-btn', type: 'button', 'aria-label': 'Settings', title: 'Settings', onclick: toggleSettings },
+      icon('gear')
     );
+    authSlot.replaceChildren(moreMenu().element, settingsButton, accountMenu().element);
+    updateHeaderState();
   } else {
     authSlot.replaceChildren(h('button', { class: 'btn small sign-in', type: 'button', onclick: startGoogleSignIn }, 'Sign in'));
   }
@@ -761,7 +991,12 @@ function renderHistory() {
 // The weight and reps fields have inputmode="none", so the phone's own keyboard never opens.
 // They are still ordinary focusable text fields: a physical keyboard types into them as
 // usual, and the pad below just edits the value of whichever one is active.
+//
+// Each field is <input data-pad="weight|reps"> with an entry in padConfig: `next` gives the
+// field that the pad's action key (and Enter) moves to; on the last field of a form there is
+// no `next`, and the action key, labelled `action`, submits the form.
 
+const padConfig = new WeakMap(); // field -> { next: () => field, action: 'Add set' }
 let padField = null; // the field the pad is editing, or null when the pad is closed
 let padFresh = false; // true until the first key: the next digit replaces the pre-filled value
 let padSuppressed = false; // set while focusing a field from code without opening the pad
@@ -807,9 +1042,9 @@ function openPad(field) {
   padFresh = true;
   field.classList.add('pad-active');
 
-  const isWeight = field.name === 'weight';
-  padPoint.disabled = !isWeight;
-  padAction.textContent = isWeight ? 'Next' : 'Add set';
+  const config = padConfig.get(field) ?? {};
+  padPoint.disabled = field.dataset.pad !== 'weight';
+  padAction.textContent = config.next ? 'Next' : config.action ?? 'Done';
 
   pad.classList.add('open');
   // Room at the bottom of the page so the last fields can scroll clear of the pad.
@@ -842,7 +1077,7 @@ function pressPadKey(key) {
     closePad();
     return;
   }
-  const isWeight = field.name === 'weight';
+  const isWeight = field.dataset.pad === 'weight';
 
   if (key === 'hide') {
     // Just puts the pad away. What has been typed stays in the row, unsaved.
@@ -851,15 +1086,20 @@ function pressPadKey(key) {
     return;
   }
   if (key === 'action') {
-    if (isWeight) {
-      openPad(field.form.elements.reps);
+    const next = padConfig.get(field)?.next?.();
+    if (next) {
+      openPad(next);
     } else if (field.form.checkValidity()) {
-      field.form.requestSubmit(); // same as pressing the form's own "Add set"
+      field.form.requestSubmit(); // same as pressing the form's own submit button
     } else {
       // The browser's own "fill out this field" bubble would sit behind the pad, so mark
-      // the field instead. The mark clears on the next key.
-      field.classList.add('pad-invalid');
-      field.setAttribute('aria-invalid', 'true');
+      // the first field that needs fixing instead. The mark clears on the next key.
+      const invalid = [...field.form.elements].find((element) => isPadField(element) && !element.checkValidity()) ?? field;
+      if (invalid !== field) {
+        openPad(invalid);
+      }
+      invalid.classList.add('pad-invalid');
+      invalid.setAttribute('aria-invalid', 'true');
     }
     return;
   }
@@ -887,6 +1127,8 @@ function pressPadKey(key) {
 
   padFresh = false;
   field.value = text;
+  // Tell the field's listeners, as typing would.
+  field.dispatchEvent(new Event('input', { bubbles: true }));
   // Tapping a key can take focus on some browsers; put the caret back at the end.
   field.focus({ preventScroll: true });
   field.setSelectionRange(text.length, text.length);
@@ -925,15 +1167,24 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-// A weight or reps field wired to the pad. `allowed` strips anything a physical keyboard
-// (or paste) puts in that isn't part of a number.
-function padInput(attrs, allowed) {
+// A weight or reps field (`kind`) wired to the pad; `config` is its padConfig entry. Anything
+// a physical keyboard (or paste) puts in that isn't part of a number is stripped out.
+function padInput(attrs, kind, config = {}) {
+  const allowed = kind === 'weight' ? weightText : repsText;
   const input = h('input', {
     type: 'text',
     inputmode: 'none',
     autocomplete: 'off',
-    'data-pad': true,
+    'data-pad': kind,
     ...attrs,
+    // Enter moves on to the next field, like the pad's "Next"; on the last field it submits.
+    onkeydown: (event) => {
+      const next = event.key === 'Enter' && config.next?.();
+      if (next) {
+        event.preventDefault();
+        openPad(next);
+      }
+    },
     onfocus: () => {
       if (!padSuppressed && padField !== input) {
         openPad(input);
@@ -960,6 +1211,7 @@ function padInput(attrs, allowed) {
       }
     },
   });
+  padConfig.set(input, config);
   return input;
 }
 
@@ -968,6 +1220,10 @@ const weightText = (value) => {
   return rest.length ? `${whole}.${rest.join('')}` : whole;
 };
 const repsText = (value) => value.replace(/[^0-9]/g, '');
+
+// What the weight and reps fields accept (checked by the browser before a form is sent).
+const WEIGHT_PATTERN = '[0-9]*[.]?[0-9]*';
+const REPS_PATTERN = '0*[1-9][0-9]*';
 
 // ---------- Workout: exercises and sets ----------
 
@@ -1059,10 +1315,11 @@ document.addEventListener('pointerdown', (event) => {
 function addExerciseForm(workout, add) {
   const inWorkout = new Set(workout.exercises.map((exercise) => exerciseKey(exercise.name)));
   // Most recently used first. Exercises already in this workout go to the end: they are
-  // the most recent of all, and the least likely to be wanted again.
-  const entries = [...library.values()].sort(
-    (a, b) => inWorkout.has(a.key) - inWorkout.has(b.key) || b.lastUsedAt - a.lastUsedAt || a.name.localeCompare(b.name)
-  );
+  // the most recent of all, and the least likely to be wanted again. Exercises removed from
+  // the list on the Exercise data page are left out.
+  const entries = [...library.values()]
+    .filter((entry) => !entry.hidden)
+    .sort((a, b) => inWorkout.has(a.key) - inWorkout.has(b.key) || b.lastUsedAt - a.lastUsedAt || a.name.localeCompare(b.name));
   let matches = [];
   let active = -1; // index of the highlighted option, or -1
 
@@ -1266,9 +1523,11 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
     // "Last: 135 lb × 8" or "Max: 155 lb × 5"; pressing it switches between the two.
     // Last is the most recent set from before this workout. Max is the heaviest set ever,
     // this workout included. Not shown for an exercise with no sets before this workout.
+    // Both follow the hand edits from the Exercise data page (an edited Last shows until a
+    // set logged after the edit is in an earlier workout).
     const setHint = () => {
       const key = exerciseKey(exercise.name);
-      const previous = earlier.get(key)?.last;
+      const previous = earlier.has(key) ? earlier.get(key).last : editedStats(library.get(key)).last;
       const max = library.get(key)?.max;
       if (!previous || !max) {
         return null;
@@ -1320,30 +1579,25 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
         {
           name: 'weight',
           enterkeyhint: 'next',
-          pattern: '[0-9]*[.]?[0-9]*',
+          pattern: WEIGHT_PATTERN,
           title: 'A number, for example 62.5',
           placeholder: '0',
           value: openSet.weight || null,
-          // Enter moves on to reps instead of adding the set.
-          onkeydown: (event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              openPad(repsInput);
-            }
-          },
         },
-        weightText
+        'weight',
+        { next: () => repsInput } // Enter and the pad's "Next" move on to reps
       );
       const repsInput = padInput(
         {
           name: 'reps',
           enterkeyhint: 'done',
-          pattern: '0*[1-9][0-9]*',
+          pattern: REPS_PATTERN,
           title: 'A whole number, 1 or more',
           required: true,
           value: openSet.reps || null,
         },
-        repsText
+        'reps',
+        { action: 'Add set' }
       );
 
       return h(
@@ -1362,7 +1616,9 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
             if (!(reps >= 1) || weight < 0) {
               return;
             }
-            exercise.sets.push({ id: newId(), weight, unit, reps });
+            // `at`: when it was logged, which decides whether it counts towards hand-edited
+            // stats in the exercise library.
+            exercise.sets.push({ id: newId(), weight, unit, reps, at: Date.now() });
             openSet = null; // back to the "+ Add set" button; the next set is opened by hand
             commit(`${card} .open-set`, { used: [exercise.name] });
           },
@@ -1645,6 +1901,290 @@ function renderDone(workout, outlineState) {
   }
 }
 
+// ---------- Exercise data: each exercise's Max and Last, with hand edits ----------
+//
+// The exercise library, most recently used first, with a search box. Each exercise has a
+// menu: Edit (its Max and Last sets, typed with the number pad), Clear stats and Remove from
+// list. These change only the library entry, never a workout; see the Exercise library
+// section for how the edits are stored and kept.
+
+// Kept while the page is redrawn; cleared when another screen is opened (see route).
+let exerciseQuery = ''; // what is typed in the search box
+let editingExercise = null; // key of the exercise whose stats are being edited, or null
+let exerciseStatus = ''; // the message under the search box
+
+// Applies hand-made changes (`manual`, `last`, `max`, `hidden`) to one library entry.
+function saveLibraryChanges(key, changes) {
+  const entry = { ...library.get(key), ...changes };
+  library.set(key, entry);
+  fb.saveExercises(user.uid, [{ id: entry.id, ...changes }]).catch(reportSaveError);
+}
+
+// { last, max } of an exercise with the given hand edits, worked out from the workouts.
+function statsWith(key, manual) {
+  const entry = { ...library.get(key), manual };
+  const found = deriveLibrary(workouts.values(), new Set([key]), new Map([[key, entry]])).get(key);
+  return found ? { last: found.last, max: found.max } : editedStats(entry);
+}
+
+// One stat in the editor: the weight, its unit and the reps of the Max or the Last set,
+// filled in with the set as it is now, in the current unit. `next` gives the field that
+// comes after this stat's reps; without it, the reps field's pad key saves.
+function statFields(label, which, record, next) {
+  const before = { weight: record ? shownWeight(record) : '', unit: settings.unit, reps: record ? String(record.reps) : '' };
+  let unit = before.unit;
+
+  const weight = padInput(
+    { name: `${which}Weight`, pattern: WEIGHT_PATTERN, title: 'A number, for example 62.5', placeholder: '0', value: before.weight || null },
+    'weight',
+    { next: () => reps }
+  );
+  const reps = padInput(
+    { name: `${which}Reps`, pattern: REPS_PATTERN, title: 'A whole number, 1 or more', value: before.reps || null },
+    'reps',
+    next ? { next } : { action: 'Save' }
+  );
+  // Emptying both fields empties the stat. A weight needs reps; reps with no weight is
+  // bodyweight, as when adding a set.
+  const needReps = () => {
+    reps.required = weight.value !== '';
+  };
+  weight.addEventListener('input', needReps);
+  needReps();
+
+  // lb / kg for this set only. It says which unit the number is in; it doesn't convert it.
+  const unitButtons = UNITS.map((option) =>
+    h(
+      'button',
+      {
+        class: 'unit-option',
+        type: 'button',
+        'aria-pressed': String(option === unit),
+        onclick: () => {
+          unit = option;
+          unitButtons.forEach((button) => button.setAttribute('aria-pressed', String(button.textContent === unit)));
+        },
+      },
+      option
+    )
+  );
+
+  // { unchanged: true }, or { set } with the stat's new set (null to empty it). Only called
+  // once the browser has checked the fields.
+  const read = () => {
+    const weightValue = weight.value.trim();
+    const repsValue = reps.value.trim();
+    const sameWeight = weightValue === before.weight && unit === before.unit;
+    if (sameWeight && repsValue === before.reps) {
+      return { unchanged: true };
+    }
+    if (!weightValue && !repsValue) {
+      return { set: null };
+    }
+    // A weight left as it was filled in keeps the stored value and unit exactly, rather
+    // than a rounded conversion of it.
+    const keep = sameWeight && record;
+    return {
+      set: {
+        weight: keep ? record.weight : Number(weightValue) || 0,
+        unit: keep ? unitOf(record) : unit,
+        reps: Math.max(1, Math.floor(Number(repsValue))),
+      },
+    };
+  };
+
+  const element = h(
+    'fieldset',
+    { class: 'stat-fields' },
+    h('legend', {}, label),
+    h(
+      'div',
+      { class: 'stat-row' },
+      h('label', {}, 'Weight', weight),
+      h('div', { class: 'unit-toggle', role: 'group', 'aria-label': `${label} weight unit` }, unitButtons),
+      h('label', {}, 'Reps', reps)
+    )
+  );
+  return { element, first: weight, read };
+}
+
+// The form for editing an exercise's Max and Last. `done` is called with the message to
+// show (empty when nothing changed or it was cancelled).
+function statsEditor(entry, done) {
+  let lastStat = null;
+  const maxStat = statFields('Max', 'max', entry.max, () => lastStat.first);
+  lastStat = statFields('Last', 'last', entry.last, null);
+
+  return h(
+    'form',
+    {
+      class: 'stats-editor',
+      onsubmit: (event) => {
+        event.preventDefault();
+        const manual = manualEdits(entry);
+        const at = Date.now();
+        let changed = false;
+        for (const [which, stat] of [
+          ['max', maxStat],
+          ['last', lastStat],
+        ]) {
+          const result = stat.read();
+          if (!result.unchanged) {
+            manual[which] = { at, set: result.set };
+            changed = true;
+          }
+        }
+        if (changed) {
+          saveLibraryChanges(entry.key, { manual, ...statsWith(entry.key, manual) });
+        }
+        done(changed ? `Saved ${entry.name}.` : '');
+      },
+    },
+    maxStat.element,
+    lastStat.element,
+    h('p', { class: 'muted' }, 'An edited Max stays until a new set beats it. An edited Last is replaced by the next set you log.'),
+    h(
+      'div',
+      { class: 'row' },
+      h('button', { class: 'btn grow' }, 'Save'),
+      h('button', { class: 'btn secondary grow', type: 'button', onclick: () => done('') }, 'Cancel')
+    )
+  );
+}
+
+const statLine = (label, record) => [
+  h('dt', {}, label),
+  h(
+    'dd',
+    {},
+    record ? formatSet(record) : h('span', { class: 'muted' }, 'None'),
+    record?.edited && h('span', { class: 'muted edited' }, ' · edited')
+  ),
+];
+
+function renderExerciseData() {
+  const heading = h('h1', { tabindex: '-1' }, 'Exercise data');
+  const search = h('input', {
+    type: 'search',
+    class: 'exercise-search',
+    placeholder: 'Search exercises',
+    'aria-label': 'Search exercises',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    enterkeyhint: 'search',
+    value: exerciseQuery || null,
+    oninput: () => {
+      exerciseQuery = search.value;
+      editingExercise = null;
+      exerciseStatus = '';
+      drawList();
+    },
+    // Enter puts the phone keyboard away; the list is already filtered.
+    onkeydown: (event) => {
+      if (event.key === 'Enter') {
+        search.blur();
+      }
+    },
+  });
+  // Always in the page, so screen readers announce what is put in it.
+  const status = h('p', { class: 'muted status exercise-status', role: 'status' });
+  const list = h('ul', { class: 'exercise-data-list', 'aria-label': 'Exercises' });
+  const empty = h('p', { class: 'muted' });
+
+  const cardOf = (key) => [...list.children].find((item) => item.dataset.key === key);
+  const menuButtonOf = (item) => item?.querySelector('.dropdown > button');
+
+  const finishEditing = (key) => (message) => {
+    editingExercise = null;
+    exerciseStatus = message;
+    drawList();
+    menuButtonOf(cardOf(key))?.focus();
+  };
+
+  const edit = (entry) => {
+    editingExercise = entry.key;
+    exerciseStatus = '';
+    drawList();
+    // The Max weight, with the pad open on it.
+    cardOf(entry.key)?.querySelector('input')?.focus();
+  };
+
+  const clearStats = (entry) => {
+    if (!confirm(`Clear the Max and Last of ${entry.name}? They stay empty until you log a new set. Your workouts and history are not changed.`)) {
+      return;
+    }
+    const at = Date.now();
+    const manual = { max: { at, set: null }, last: { at, set: null } };
+    saveLibraryChanges(entry.key, { manual, ...statsWith(entry.key, manual) });
+    exerciseStatus = `Cleared the stats of ${entry.name}.`;
+    drawList();
+    menuButtonOf(cardOf(entry.key))?.focus();
+  };
+
+  const remove = (entry) => {
+    if (
+      !confirm(
+        `Remove ${entry.name} from your exercise list? It won't be suggested when you add an exercise. Logging it again brings it back. Your workouts and history are not changed.`
+      )
+    ) {
+      return;
+    }
+    const index = [...list.children].indexOf(cardOf(entry.key));
+    saveLibraryChanges(entry.key, { hidden: true });
+    exerciseStatus = `Removed ${entry.name} from the list.`;
+    drawList();
+    // Focus goes to the exercise that took its place, or the one before it.
+    (menuButtonOf(list.children[index] ?? list.children[index - 1]) ?? heading).focus();
+  };
+
+  const card = (entry) => {
+    const editing = editingExercise === entry.key;
+    const actions =
+      !editing &&
+      dropdown(h('button', { class: 'icon-btn', type: 'button', 'aria-label': `Options for ${entry.name}`, title: 'Options' }, icon('more')), [
+        { label: 'Edit', onSelect: () => edit(entry) },
+        { label: 'Clear stats', destructive: true, disabled: !entry.max && !entry.last, onSelect: () => clearStats(entry) },
+        { label: 'Remove from list', destructive: true, onSelect: () => remove(entry) },
+      ]);
+    return h(
+      'li',
+      { class: 'card exercise-data', 'data-key': entry.key },
+      h('div', { class: 'row' }, h('h3', { class: 'grow' }, entry.name), actions && actions.element),
+      editing ? statsEditor(entry, finishEditing(entry.key)) : h('dl', { class: 'stats' }, statLine('Max', entry.max), statLine('Last', entry.last))
+    );
+  };
+
+  function drawList() {
+    closePad();
+    // A menu on one of the cards about to be replaced; one in the header can stay open.
+    if (openMenu && list.contains(openMenu.element)) {
+      closeMenus();
+    }
+    const all = [...library.values()]
+      .filter((entry) => !entry.hidden)
+      .sort((a, b) => b.lastUsedAt - a.lastUsedAt || a.name.localeCompare(b.name));
+    const typed = exerciseKey(exerciseQuery);
+    const shown = all.filter((entry) => entry.key.includes(typed));
+    status.textContent = exerciseStatus;
+    list.replaceChildren(...shown.map(card));
+    empty.textContent = !all.length
+      ? 'No exercises yet. Exercises you add to a workout show up here.'
+      : `No exercises match "${exerciseQuery.trim()}".`;
+    empty.hidden = shown.length > 0;
+  }
+
+  view.replaceChildren(
+    h('a', { class: 'back', href: '#/' }, '← Back'),
+    heading,
+    h('p', { class: 'muted exercise-intro' }, "Max is your heaviest set and Last your most recent. Changes here don't change any workout."),
+    search,
+    status,
+    list,
+    empty
+  );
+  drawList();
+}
+
 // ---------- Settings: account and backup ----------
 
 const BACKUP_FORMAT = 'gym-workouts';
@@ -1843,11 +2383,22 @@ function renderSettings(backupMessage, outlineMessage) {
 // The home and history screens are lists that are safe to redraw when data changes.
 const onListScreen = () => ['', '#', '#/', '#/history'].includes(location.hash);
 
+let shownHash = null; // the address of the screen last routed to, to tell opening from redrawing
+
 function route() {
+  const newScreen = location.hash !== shownHash;
+  shownHash = location.hash;
+  if (newScreen) {
+    // A redraw of the same screen (new data arriving) leaves an open header menu open.
+    closeMenus();
+    exerciseQuery = '';
+    editingExercise = null;
+    exerciseStatus = '';
+  }
   stopTimer();
   closePad();
   closeExerciseList?.();
-  setAccountMenu(false);
+  updateHeaderState();
   openSet = null;
   if (!fb) {
     return;
@@ -1867,6 +2418,13 @@ function route() {
   }
   if (location.hash === '#/history') {
     renderHistory();
+    return;
+  }
+  if (location.hash === '#/exercises') {
+    renderExerciseData();
+    if (newScreen) {
+      window.scrollTo(0, 0);
+    }
     return;
   }
   const match = location.hash.match(/^#\/(workout|done)\/(.+)$/);

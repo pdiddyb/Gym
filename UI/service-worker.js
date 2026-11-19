@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gym-pwa-v14';
+const CACHE_NAME = 'gym-pwa-v15';
 
 // The app's own files. Served from the cache straight away and refreshed in the background.
 const ASSETS = [
