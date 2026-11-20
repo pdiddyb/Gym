@@ -30,8 +30,10 @@ Data lives in Firestore under `users/{uid}/`:
   timer length (2:00 until changed)
 - `exercises/{exerciseId}` the exercise library: one entry per exercise that is in any workout,
   with its last and heaviest set. It is worked out from the workouts (and kept up to date as
-  sets are saved or deleted), and feeds the "Add exercise" suggestions, the Last/Max line on
-  each exercise card and the Exercise data screen. Hand edits made there are kept in two
+  sets are saved or deleted), and feeds the "Add exercise" suggestions and the Exercise data
+  screen. The "Last … Max …" line on each exercise card in a workout is worked out from the
+  workouts before that one instead (so sets logged in it don't count until it is finished),
+  with the same hand edits applied. Hand edits made on the Exercise data screen are kept in two
   fields that the automatic updates and the one-time rebuild never write:
   - `manual: { max, last }`, each `{ at, set }` (or null when not edited): an edited Max or Last
     set, or `set: null` for a cleared one, made at time `at`. Only sets logged after `at` count

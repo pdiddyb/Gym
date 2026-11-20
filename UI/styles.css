@@ -1136,37 +1136,47 @@ h1[tabindex='-1']:focus {
   margin-top: 10px;
 }
 
-/* "Last: 135 lb × 8" / "Max: 155 lb × 5" switch above the set row */
+/* "Last 135 lb × 8   Max 155 lb × 5" above the set row. One line when both fit; otherwise
+   Max wraps under Last, and the labels' fixed width lines the two values up in a column. */
 
-.set-hint-row {
-  margin-top: 10px;
-}
-
-.set-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  min-height: 36px;
-  padding: 4px 10px;
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--control);
-  border-radius: 999px;
-  font: inherit;
-  font-size: 0.9rem;
+.set-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 24px;
+  margin: 10px 0 0;
+  font-size: 0.95rem;
   font-variant-numeric: tabular-nums;
-  cursor: pointer;
 }
 
-.set-hint:hover {
-  color: var(--text);
+.set-stat {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
 }
 
-.set-hint .icon {
-  width: 16px;
-  height: 16px;
+.set-stat dt {
   flex: none;
+  min-width: 2.4em;
+  color: var(--muted);
+}
+
+.set-stat dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Read by screen readers, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* "Add exercise" suggestions */
