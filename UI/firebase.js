@@ -167,10 +167,21 @@ export function watchExercises(uid, onData, onError) {
   );
 }
 
-// Saves the given library entries and deletes the ones whose ids are in removedIds.
+// The whole library as the server has it. Rejects when offline.
+export async function serverExercises(uid) {
+  const snapshot = await getDocsFromServer(exercisesOf(uid));
+  return snapshot.docs.map((item) => ({ ...item.data(), id: item.id }));
+}
+
+// Writes the given fields of each library entry and deletes the entries whose ids are in
+// removedIds. Each field given replaces that field whole; fields not given are left as they
+// are, so the automatic updates never touch the hand edits (`manual`) or `hidden`.
 export function saveExercises(uid, entries, removedIds = []) {
   const writes = [
-    ...entries.map((entry) => (batch) => batch.set(exerciseRef(uid, entry.id), withoutId(entry))),
+    ...entries.map((entry) => (batch) => {
+      const data = withoutId(entry);
+      batch.set(exerciseRef(uid, entry.id), data, { mergeFields: Object.keys(data) });
+    }),
     ...removedIds.map((id) => (batch) => batch.delete(exerciseRef(uid, id))),
   ];
   const commits = [];

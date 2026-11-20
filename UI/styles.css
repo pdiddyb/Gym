@@ -226,13 +226,101 @@ a.btn {
   pointer-events: none;
 }
 
-/* Profile picture button and its menu (scoped to the header: the Settings screen has an
-   "account" card of its own) */
-#auth .account {
+/* Dropdown menus: the header's ⋮ and profile menus and the menu on each exercise of the
+   Exercise data page. The panel hangs under its button, lined up with the button's right
+   edge (app.js moves it above the button when there is no room below). */
+.dropdown {
   position: relative;
   display: flex;
+  flex: none;
 }
 
+.menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  min-width: 200px;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--control);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+.menu-panel[hidden] {
+  display: none;
+}
+
+.menu-panel.above {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+/* Name and email above the profile menu's options; selectable, unlike the rest of the header. */
+.menu-head {
+  margin-bottom: 6px;
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--border);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.menu-head strong,
+.menu-head .muted {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.menu {
+  display: grid;
+  gap: 2px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover {
+  background: var(--surface-2);
+}
+
+.menu-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.menu-item.destructive {
+  color: var(--danger);
+}
+
+.menu-item:disabled {
+  background: transparent;
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* A header button whose menu is open, and the gear while Settings is showing. */
+.icon-btn[aria-expanded='true'],
+.icon-btn[aria-pressed='true'] {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+/* Profile picture button */
 .avatar-btn {
   width: 44px;
   height: 44px;
@@ -264,35 +352,8 @@ a.btn {
   object-fit: cover;
 }
 
-.account-menu {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 10;
-  width: max-content;
-  min-width: 200px;
-  max-width: min(280px, calc(100vw - 32px));
-  padding: 14px;
-  background: var(--surface);
-  border: 1px solid var(--control);
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.account-menu[hidden] {
-  display: none;
-}
-
-.account-menu strong,
-.account-menu .muted {
-  display: block;
-  overflow-wrap: anywhere;
-}
-
-.account-menu .btn {
-  margin-top: 12px;
+.avatar-btn[aria-expanded='true'] .avatar {
+  border-color: var(--text);
 }
 
 #notice {
@@ -524,6 +585,122 @@ h1 + p {
 
 .exercise .planned {
   margin: 8px 0 0;
+}
+
+/* Exercise data */
+
+.exercise-intro {
+  margin: 8px 0 12px;
+}
+
+/* Safari draws search boxes its own way; keep the look of the other fields. */
+input[type='search'] {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.exercise-status {
+  margin: 12px 0 0;
+}
+
+.exercise-status:empty {
+  margin: 0;
+}
+
+.exercise-data-list {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 6px 0 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats dt {
+  color: var(--muted);
+}
+
+.stats dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.stats .edited {
+  font-size: 0.85rem;
+}
+
+.stats-editor {
+  display: grid;
+  gap: 14px;
+  margin-top: 10px;
+}
+
+.stats-editor p {
+  margin: 0;
+}
+
+.stat-fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.stat-fields legend {
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.stat-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.stat-row label {
+  flex: 1;
+  min-width: 0;
+}
+
+/* "Logged in: lb / kg" under the weight and reps, its hint, and once the unit has been
+   switched, the result in both units. */
+.unit-line {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.stat-fields .unit-hint {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+}
+
+.stat-fields .unit-result {
+  margin: 6px 0 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-fields .unit-result:empty {
+  margin: 0;
+}
+
+/* The heading is focused from code (after an exercise is removed); it needs no ring. */
+h1[tabindex='-1']:focus {
+  outline: none;
 }
 
 /* lb / kg switch */
