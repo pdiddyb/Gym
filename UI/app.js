@@ -9,10 +9,10 @@ let fb = null; // the firebase.js module, once loaded
 let user = null; // signed-in Firebase user, or null
 let workouts = new Map(); // id -> workout, kept current by a Firestore listener
 let workoutsReady = false;
-// Saved in the account. unit: lb until the user chooses otherwise. setHint: whether exercise
-// cards show the last set or the heaviest set ('last' or 'max'). restSeconds: the rest timer
-// length for exercises that haven't been given their own.
-const DEFAULT_SETTINGS = { unit: 'lb', setHint: 'last', restSeconds: 120 };
+// Saved in the account. unit: lb until the user chooses otherwise. restSeconds: the rest timer
+// length for exercises that haven't been given their own. (Accounts may also have a `setHint`
+// from when exercise cards had a Last/Max switch; it is no longer used and is ignored.)
+const DEFAULT_SETTINGS = { unit: 'lb', restSeconds: 120 };
 let settings = { ...DEFAULT_SETTINGS };
 let settingsReady = false;
 let library = new Map(); // exercise key -> library entry, kept current by a Firestore listener
@@ -57,8 +57,6 @@ const ICONS = {
   keyboardDown:
     '<rect x="3" y="3.5" width="18" height="11" rx="2"/><path d="M7 7.5h.01M11 7.5h.01M15 7.5h.01M8 11h8"/><path d="M9 18l3 3 3-3"/>',
   backspace: '<path d="M21 5H9l-6 7 6 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z"/><path d="M17 9.5l-5 5M12 9.5l5 5"/>',
-  // two arrows pointing opposite ways
-  swap: '<path d="M7 4L3 8l4 4"/><path d="M3 8h14"/><path d="M17 12l4 4-4 4"/><path d="M21 16H7"/>',
   pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>',
 };
 
@@ -1293,11 +1291,6 @@ function unitToggle(afterChange) {
   );
 }
 
-// The small button on an exercise card that shows the last set or the heaviest set.
-function setSetHint(which) {
-  settings = { ...settings, setHint: which };
-  fb.saveSettings(user.uid, { setHint: which }).catch(reportSaveError);
-}
 
 // ---------- "Add exercise" box, with suggestions from the exercise library ----------
 //
@@ -2099,11 +2092,16 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
     redraw(nextFocus);
   };
 
-  // What the workouts before this one say about its exercises, for the "Last:" line.
+  // Last and Max of each exercise from the workouts before this one only, so the sets logged
+  // in this workout don't change them until it is finished and the next one starts. The hand
+  // edits from the Exercise data page apply as they do there: an edited or cleared stat stands
+  // until a set logged after the edit beats or replaces it.
   const earlier = deriveLibrary(
     [...workouts.values()].filter((other) => other.id !== workout.id && (other.startedAt || 0) <= (workout.startedAt || 0)),
     new Set(workout.exercises.map((exercise) => exerciseKey(exercise.name)))
   );
+  // An exercise in none of those workouts has only its hand edits, if any.
+  const statsBefore = (name) => earlier.get(exerciseKey(name)) ?? editedStats(library.get(exerciseKey(name)));
 
   const exerciseCards = workout.exercises.map((exercise) => {
     const last = exercise.sets[exercise.sets.length - 1];
@@ -2111,38 +2109,26 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
     // How many sets the outline this workout was started from had, while there are fewer.
     const planned = exercise.plannedSets > exercise.sets.length ? exercise.plannedSets : 0;
 
-    // "Last: 135 lb × 8" or "Max: 155 lb × 5"; pressing it switches between the two.
-    // Last is the most recent set from before this workout. Max is the heaviest set ever,
-    // this workout included. Not shown for an exercise with no sets before this workout.
-    // Both follow the hand edits from the Exercise data page (an edited Last shows until a
-    // set logged after the edit is in an earlier workout).
-    const setHint = () => {
-      const key = exerciseKey(exercise.name);
-      const previous = earlier.has(key) ? earlier.get(key).last : editedStats(library.get(key)).last;
-      const max = library.get(key)?.max;
-      if (!previous || !max) {
-        return null;
-      }
-      const showMax = settings.setHint === 'max';
-      const text = `${showMax ? 'Max' : 'Last'}: ${formatSet(showMax ? max : previous)}`;
-      return h(
-        'div',
-        { class: 'set-hint-row' },
+    // "Last 135 lb × 8   Max 155 lb × 5", always shown, in the current unit (the lb/kg switch
+    // redraws the screen). Last is the last set of the most recent earlier workout with this
+    // exercise, Max the heaviest earlier set (see `earlier`). A value with nothing behind it
+    // shows "— × —", so the line looks the same for a brand-new exercise.
+    const setStats = () => {
+      const before = statsBefore(exercise.name);
+      const stat = (label, record) =>
         h(
-          'button',
-          {
-            class: 'set-hint',
-            type: 'button',
-            'aria-label': `${text}. Show ${showMax ? 'last set' : 'heaviest set'} instead.`,
-            onclick: () => {
-              setSetHint(showMax ? 'last' : 'max');
-              redraw(`${card} .set-hint`);
-            },
-          },
-          h('span', {}, text),
-          icon('swap')
-        )
-      );
+          'div',
+          { class: 'set-stat' },
+          h('dt', {}, label),
+          h(
+            'dd',
+            {},
+            record
+              ? formatSet(record)
+              : [h('span', { 'aria-hidden': 'true' }, '— × —'), h('span', { class: 'visually-hidden' }, 'none yet')]
+          )
+        );
+      return h('dl', { class: 'set-stats' }, stat('Last', before.last), stat('Max', before.max));
     };
 
     // Closed: just a button. Opening it closes any other exercise's row without saving.
@@ -2298,7 +2284,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
       planned > 0 &&
         exercise.sets.length > 0 &&
         h('p', { class: 'muted planned' }, `${exercise.sets.length} of ${planned} planned sets`),
-      setHint(),
+      setStats(),
       openSet?.exerciseId === exercise.id ? setRow() : openButton()
     );
   });
@@ -3150,12 +3136,12 @@ function onUserChanged(nextUser) {
       );
     }
   );
-  const settingsLoaded = ({ unit, setHint, restSeconds }) => {
+  const settingsLoaded = ({ unit, restSeconds }) => {
     const first = !settingsReady;
     settingsReady = true;
     // false for the echo of a change made here
-    const changed = unit !== settings.unit || setHint !== settings.setHint || restSeconds !== settings.restSeconds;
-    settings = { ...settings, unit, setHint, restSeconds };
+    const changed = unit !== settings.unit || restSeconds !== settings.restSeconds;
+    settings = { ...settings, unit, restSeconds };
     if (first || changed) {
       route();
     }
@@ -3167,7 +3153,6 @@ function onUserChanged(nextUser) {
       // Nothing saved yet means the defaults.
       settingsLoaded({
         unit: saved.unit === 'kg' ? 'kg' : 'lb',
-        setHint: saved.setHint === 'max' ? 'max' : 'last',
         restSeconds: cleanRestSeconds(saved.restSeconds) ?? DEFAULT_SETTINGS.restSeconds,
       });
       if (first && !saved.libraryBuilt) {
