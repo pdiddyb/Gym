@@ -9,10 +9,11 @@ let fb = null; // the firebase.js module, once loaded
 let user = null; // signed-in Firebase user, or null
 let workouts = new Map(); // id -> workout, kept current by a Firestore listener
 let workoutsReady = false;
-// Saved in the account. unit: lb until the user chooses otherwise. restSeconds: the rest timer
-// length for exercises that haven't been given their own. (Accounts may also have a `setHint`
-// from when exercise cards had a Last/Max switch; it is no longer used and is ignored.)
-const DEFAULT_SETTINGS = { unit: 'lb', restSeconds: 120 };
+// Saved in the account. unit: lb until the user chooses otherwise. restSeconds and restOn: the
+// rest timer's length and whether logging a set starts it (see Rest timer). (Accounts may also
+// have a `setHint` from when exercise cards had a Last/Max switch; it is no longer used and is
+// ignored.)
+const DEFAULT_SETTINGS = { unit: 'lb', restSeconds: 120, restOn: true };
 let settings = { ...DEFAULT_SETTINGS };
 let settingsReady = false;
 let library = new Map(); // exercise key -> library entry, kept current by a Firestore listener
@@ -1493,12 +1494,16 @@ function rememberOpenSetValues() {
 
 // ---------- Rest timer ----------
 //
-// Each exercise has a rest timer that is on or off and has a length. Both are kept on its
-// exercise library entry as `rest: { on, seconds }`, each field written only once the user
-// has changed it: an exercise with no `on` has its timer on, and one with no `seconds` uses
-// the default length from Settings (settings.restSeconds).
+// One rest timer for every exercise. Its length and whether it is on are saved in the
+// account's settings (settings.restSeconds, settings.restOn) as soon as they are changed, so
+// they are the same in the next workout, after the app is closed, and on other devices; with
+// no signal, Firestore keeps the change on the device and uploads it later. Nothing saved
+// means 2:00 and on.
 //
-// Logging a set of an exercise whose timer is on starts a rest. The rest is saved on the
+// Older versions had a timer per exercise, kept on exercise library entries as
+// `rest: { on, seconds }`. Those are ignored and left as they are.
+//
+// While the timer is on, logging a set of any exercise starts a rest. The rest is saved on the
 // workout in progress as `restEndsAt` (when it ends, in ms like Date.now()) and
 // `restExercise` (the exercise's name, passed to onRestScheduled). Everything shown is
 // worked out from restEndsAt and the current time, never counted down, so it is still right
@@ -1519,40 +1524,10 @@ const cleanRestSeconds = (value) =>
     ? value
     : null;
 
-// The usable fields of a stored `rest`.
-function storedRest(rest) {
-  const fields = {};
-  if (typeof rest?.on === 'boolean') {
-    fields.on = rest.on;
-  }
-  if (cleanRestSeconds(rest?.seconds)) {
-    fields.seconds = rest.seconds;
-  }
-  return fields;
-}
-
-// { on, seconds }: an exercise's rest timer, with the defaults filled in.
-function restSettingFor(name) {
-  const rest = storedRest(library.get(exerciseKey(name))?.rest);
-  return { on: rest.on ?? true, seconds: rest.seconds ?? settings.restSeconds };
-}
-
-// Saves a change ({ on } or { seconds }) to an exercise's rest timer in its library entry.
-// Only `rest` is written, so nothing else on the entry can be overwritten.
-function saveRestSetting(name, changes) {
-  const key = exerciseKey(name);
-  const existing = library.get(key);
-  const rest = { ...storedRest(existing?.rest), ...changes };
-  // The entry is normally made when the exercise is added to a workout; this covers a
-  // library that couldn't be loaded.
-  const write = existing ? { id: existing.id, rest } : { id: exerciseDocId(key), name, key, rest };
-  library.set(key, { ...(existing ?? write), rest });
-  fb.saveExercises(user.uid, [write]).catch(reportSaveError);
-}
-
-function setDefaultRest(seconds) {
-  settings = { ...settings, restSeconds: seconds };
-  fb.saveSettings(user.uid, { restSeconds: seconds }).catch(reportSaveError);
+// Saves a change to the rest timer: { restSeconds } or { restOn }.
+function saveRestTimer(changes) {
+  settings = { ...settings, ...changes };
+  fb.saveSettings(user.uid, changes).catch(reportSaveError);
 }
 
 // ---- Hooks for push notifications (not built yet) ----
@@ -1588,14 +1563,13 @@ function saveRestState(workout) {
   tickClocks();
 }
 
-// Starts (or restarts) a rest after a set of `name` was logged, if its timer is on. Only
+// Starts (or restarts) a rest after a set of `name` was logged, if the rest timer is on. Only
 // changes the workout object; the caller saves it along with the new set.
 function startRest(workout, name) {
-  const { on, seconds } = restSettingFor(name);
-  if (!on || workout.finishedAt) {
+  if (!settings.restOn || workout.finishedAt) {
     return;
   }
-  workout.restEndsAt = Date.now() + seconds * 1000;
+  workout.restEndsAt = Date.now() + settings.restSeconds * 1000;
   workout.restExercise = name;
   hideRestBanner();
   callRestHook(onRestScheduled, workout.restEndsAt, name);
@@ -1940,9 +1914,9 @@ function wheel({ label, unit, values, value, format, onChange }) {
   };
 }
 
-// Opens the popup. `subtitle` says what the length is for; `onConfirm` gets the chosen
-// length in seconds. Cancel, Escape or a tap outside closes it without a change.
-function pickRestLength({ subtitle, seconds, onConfirm }) {
+// Opens the popup, starting at `seconds`; `onConfirm` gets the chosen length in seconds.
+// Cancel, Escape or a tap outside closes it without a change.
+function pickRestLength({ seconds, onConfirm }) {
   closeMenus();
   closePad();
 
@@ -1990,7 +1964,6 @@ function pickRestLength({ subtitle, seconds, onConfirm }) {
       'form',
       { method: 'dialog' },
       h('h2', { class: 'picker-title', id: 'picker-title' }, 'Rest timer duration'),
-      subtitle && h('p', { class: 'muted picker-subtitle' }, subtitle),
       h('div', { class: 'wheels' }, column(minutes, 'min'), column(secs, 'sec')),
       hint,
       h(
@@ -2026,23 +1999,19 @@ function pickRestLength({ subtitle, seconds, onConfirm }) {
   secs.place();
 }
 
-// The row under an exercise's name: "Rest timer 2m 30s ✎" and an on/off switch. Both
-// change the exercise's library entry, so the next workout has them too. Changes take
-// effect from the next set; a rest already running carries on.
-function restRow(exercise) {
-  let { on, seconds } = restSettingFor(exercise.name);
-
+// The rest timer's row near the top of a workout in progress: "Rest timer 2m 30s ✎" and an
+// on/off switch, for every exercise. Each change is saved straight away (see saveRestTimer).
+// Changes take effect from the next set; a rest already running carries on.
+function restTimerRow() {
   const length = h('span', {});
   const lengthButton = h('button', {
     class: 'rest-length',
     type: 'button',
     onclick: () =>
       pickRestLength({
-        subtitle: exercise.name,
-        seconds,
-        onConfirm: (chosen) => {
-          seconds = chosen;
-          saveRestSetting(exercise.name, { seconds });
+        seconds: settings.restSeconds,
+        onConfirm: (seconds) => {
+          saveRestTimer({ restSeconds: seconds });
           show();
         },
       }),
@@ -2055,22 +2024,21 @@ function restRow(exercise) {
       class: 'switch',
       type: 'button',
       role: 'switch',
-      'aria-label': `Rest timer for ${exercise.name}`,
+      'aria-label': 'Rest timer',
       onclick: () => {
-        on = !on;
-        saveRestSetting(exercise.name, { on });
+        saveRestTimer({ restOn: !settings.restOn });
         show();
       },
     },
     h('span', { class: 'switch-knob' })
   );
 
-  const row = h('div', { class: 'rest-row' }, h('span', { class: 'rest-label' }, 'Rest timer'), lengthButton, toggle);
+  const row = h('div', { class: 'rest-row workout-rest' }, h('span', { class: 'rest-label' }, 'Rest timer'), lengthButton, toggle);
   const show = () => {
-    row.classList.toggle('off', !on);
-    length.textContent = formatRestLength(seconds);
-    lengthButton.setAttribute('aria-label', `Rest timer duration for ${exercise.name}: ${restLengthWords(seconds)}. Change`);
-    toggle.setAttribute('aria-checked', String(on));
+    row.classList.toggle('off', !settings.restOn);
+    length.textContent = formatRestLength(settings.restSeconds);
+    lengthButton.setAttribute('aria-label', `Rest timer duration: ${restLengthWords(settings.restSeconds)}. Change`);
+    toggle.setAttribute('aria-checked', String(settings.restOn));
   };
   show();
   return row;
@@ -2202,7 +2170,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
             // `at`: when it was logged, which decides whether it counts towards hand-edited
             // stats in the exercise library.
             exercise.sets.push({ id: newId(), weight, unit, reps, at: Date.now() });
-            // Starts the rest, or starts it again, if this exercise's timer is on. Saved
+            // Starts the rest, or starts it again, if the rest timer is on. Saved
             // with the set below.
             startRest(workout, exercise.name);
             openSet = null; // back to the "+ Add set" button; the next set is opened by hand
@@ -2252,8 +2220,6 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           '×'
         )
       ),
-      // Rests only happen in a workout in progress.
-      !workout.finishedAt && restRow(exercise),
       exercise.sets.length
         ? h(
             'ol',
@@ -2318,6 +2284,8 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
       ),
       unitToggle(() => redraw())
     ),
+    // One rest timer for every exercise; rests only happen in a workout in progress.
+    !workout.finishedAt && restTimerRow(),
     ...exerciseCards,
     addExercise,
     h(
@@ -2901,40 +2869,6 @@ function outlineSettingsCard(outline) {
   );
 }
 
-// The default rest timer length, used by every exercise that hasn't been given its own.
-function defaultRestCard() {
-  const length = h('span', {});
-  const button = h('button', {
-    class: 'rest-length default-rest',
-    type: 'button',
-    onclick: () =>
-      pickRestLength({
-        subtitle: 'Default for exercises without their own',
-        seconds: settings.restSeconds,
-        onConfirm: (seconds) => {
-          setDefaultRest(seconds);
-          show();
-        },
-      }),
-  });
-  button.append(length, icon('pencil'));
-  const show = () => {
-    length.textContent = formatRestLength(settings.restSeconds);
-    button.setAttribute('aria-label', `Default rest timer: ${restLengthWords(settings.restSeconds)}. Change`);
-  };
-  show();
-  return h(
-    'div',
-    { class: 'card rest-settings' },
-    h('div', { class: 'row' }, h('strong', { class: 'grow' }, 'Default length'), button),
-    h(
-      'p',
-      { class: 'muted' },
-      "Used by exercises you haven't set a length for. Logging a set starts the rest; change an exercise's own length, or switch its timer off, under its name in a workout."
-    )
-  );
-}
-
 function renderSettings(backupMessage, outlineMessage) {
   const saved = sortedOutlines();
   const fileInput = h('input', {
@@ -2987,8 +2921,6 @@ function renderSettings(backupMessage, outlineMessage) {
         'Weights are shown in this unit and new sets are saved in it. Sets you already logged keep the unit they were entered in and are converted for display.'
       )
     ),
-    h('h2', {}, 'Rest timer'),
-    defaultRestCard(),
     h('h2', {}, 'Outlines'),
     ...(saved.length
       ? saved.map(outlineSettingsCard)
@@ -3136,12 +3068,12 @@ function onUserChanged(nextUser) {
       );
     }
   );
-  const settingsLoaded = ({ unit, restSeconds }) => {
+  const settingsLoaded = ({ unit, restSeconds, restOn }) => {
     const first = !settingsReady;
     settingsReady = true;
     // false for the echo of a change made here
-    const changed = unit !== settings.unit || restSeconds !== settings.restSeconds;
-    settings = { ...settings, unit, restSeconds };
+    const changed = unit !== settings.unit || restSeconds !== settings.restSeconds || restOn !== settings.restOn;
+    settings = { ...settings, unit, restSeconds, restOn };
     if (first || changed) {
       route();
     }
@@ -3154,6 +3086,7 @@ function onUserChanged(nextUser) {
       settingsLoaded({
         unit: saved.unit === 'kg' ? 'kg' : 'lb',
         restSeconds: cleanRestSeconds(saved.restSeconds) ?? DEFAULT_SETTINGS.restSeconds,
+        restOn: typeof saved.restOn === 'boolean' ? saved.restOn : DEFAULT_SETTINGS.restOn,
       });
       if (first && !saved.libraryBuilt) {
         buildLibrary(uid);
