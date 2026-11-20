@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gym-pwa-v17';
+const CACHE_NAME = 'gym-pwa-v18';
 
 // The app's own files. Served from the cache straight away and refreshed in the background.
 const ASSETS = [
@@ -6,6 +6,7 @@ const ASSETS = [
   './index.html',
   './styles.css',
   './app.js',
+  './units.js',
   './firebase.js',
   './manifest.webmanifest',
   './icons/icon-192.png',

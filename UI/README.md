@@ -5,6 +5,10 @@ Vanilla JavaScript Progressive Web App. No build step: these files are served as
 - `index.html` entry page
 - `styles.css` styling
 - `app.js` screens (sign-in, home, history, workout, workout completed, exercise data, settings with the default rest length, outlines and backup export/import), the header (one dropdown menu component for the ⋮ and profile buttons; the gear opens Settings and closes it again), the rest timer, routing, Google sign-in redirect, one-time move of old device-only workouts into the account
+- `units.js` lb/kg conversion, and the weight field logic for the add-set row: the field keeps the
+  weight as typed (or as pre-filled from the previous set) with its unit, and shows it converted
+  from that on every unit switch, so switching back and forth never changes the number. Tested
+  by `/tests` at the top of the repo.
 - `firebase.js` Firebase setup: loads the SDK from Google's CDN, Auth, Firestore with offline persistence, and the workout read/write functions
 - `service-worker.js` offline cache for the app's own files only; Firebase scripts and API calls are never cached by it (bump `CACHE_NAME` when changing assets)
 - `manifest.webmanifest` PWA manifest
@@ -47,14 +51,15 @@ Logging a set of an exercise whose rest timer is on starts a rest (or starts it 
 `restEndsAt` on the workout. The countdown is always worked out from that time, so it survives
 closing the app, a locked phone and having no signal. While resting, the clock at the top of the
 workout reads "REST 02:29" with -15s, +15s and Skip, pinned under the header. When the rest ends
-with the app open there is a "Rest over" banner, a short beep (Web Audio, only once the user has
+with the app open there is a banner that says "Rest over", a short beep (Web Audio, only once the user has
 tapped something, as browsers require) and a vibration where supported (not on iPhone). A rest
 that ended while the app was in the background still gets the alert on coming back within a
 minute.
 
 For push notifications later: `onRestScheduled(endsAt, exerciseName)` in `app.js` is called when a
 rest starts or its end moves on this device, and `onRestCancelled()` when it is skipped or the
-workout is finished or deleted. Both are empty for now.
+workout is finished or deleted. Both are empty for now. The notification should say just
+"Rest over", like the banner.
 
 Sign-in is a full-page redirect to Google and back (no popup, no Firebase helper iframe), so it
 works in Safari and in an installed iPhone home-screen app without Firebase Hosting. The address

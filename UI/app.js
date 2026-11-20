@@ -1,6 +1,8 @@
 // Gym: workouts are saved to the signed-in user's Google account (Firestore, see firebase.js).
 // IndexedDB is only read to move workouts from older, device-only versions into the account.
 
+import { UNITS, convertWeight, roundForDisplay, unitOf, sourceFromSet, weightFieldText, weightToStore } from './units.js';
+
 // ---------- State ----------
 
 let fb = null; // the firebase.js module, once loaded
@@ -137,24 +139,7 @@ function formatCountdown(ms) {
 
 // ---------- Weight units ----------
 //
-// Every set is stored exactly as it was entered: { weight, unit }. Sets saved before units
-// existed have no unit and are kilograms. Converting only ever happens on the way to the
-// screen; stored values are never rewritten.
-
-const UNITS = ['lb', 'kg'];
-const KG_PER_LB = 0.45359237;
-
-const unitOf = (set) => (set.unit === 'lb' ? 'lb' : 'kg');
-
-function convertWeight(weight, from, to) {
-  if (from === to) {
-    return weight;
-  }
-  return from === 'lb' ? weight * KG_PER_LB : weight / KG_PER_LB;
-}
-
-// One decimal place, without a trailing ".0".
-const roundForDisplay = (weight) => String(Math.round(weight * 10) / 10);
+// The conversions themselves are in units.js.
 
 // A set's weight as text in the user's current unit (or the unit given). Shown exactly when
 // it was entered in that unit, rounded when it has to be converted.
@@ -1276,21 +1261,12 @@ const REPS_PATTERN = '0*[1-9][0-9]*';
 // The lb / kg switch, used on the workout screen and in Settings. It changes the saved
 // setting: the unit weights are shown in, and the unit new sets are stored with.
 function setUnit(unit) {
-  const previous = settings.unit;
-  if (unit === previous) {
+  if (unit === settings.unit) {
     return;
   }
-  // A weight already typed into the open row was typed in the old unit; carry it across.
-  rememberOpenSetValues();
-  const typed = Number(openSet?.weight);
-  if (openSet && openSet.weight !== '' && Number.isFinite(typed)) {
-    openSet.weight = roundForDisplay(convertWeight(typed, previous, unit));
-    // Put it in the field too: the redraw that follows reads the row's values back from it.
-    const field = view.querySelector('form.add-set')?.elements.weight;
-    if (field) {
-      field.value = openSet.weight;
-    }
-  }
+  // Nothing in the open add-set row is converted here: it keeps its weight as typed, with the
+  // unit it was typed in (openSet.source), and the redraw that follows shows that in the new
+  // unit.
   settings = { ...settings, unit };
   fb.saveSettings(user.uid, { unit }).catch(reportSaveError);
 }
@@ -1508,12 +1484,16 @@ function addExerciseForm(workout, add) {
 // Which exercise has its "add a set" row open, and what has been typed into it so far.
 // Only one can be open at a time. This lives in memory only (it is never saved to the
 // account), so the row stays open, with its values, when the screen is redrawn after a save.
-let openSet = null; // { exerciseId, weight, reps } or null
+// { exerciseId, source, reps } or null. `source` is the weight as { text, unit } (see units.js):
+// the previous set's stored weight and unit when the row opens, then whatever is typed, in the
+// unit it is typed in. The weight field always shows the source in the current unit.
+let openSet = null;
 
+// Reads the reps back from the open row before a redraw. The weight needs no reading: the
+// source is updated as it is typed (see setRow in renderWorkout).
 function rememberOpenSetValues() {
   const form = view.querySelector('form.add-set');
   if (openSet && form?.dataset.exercise === openSet.exerciseId) {
-    openSet.weight = form.elements.weight.value;
     openSet.reps = form.elements.reps.value;
   }
 }
@@ -1527,7 +1507,7 @@ function rememberOpenSetValues() {
 //
 // Logging a set of an exercise whose timer is on starts a rest. The rest is saved on the
 // workout in progress as `restEndsAt` (when it ends, in ms like Date.now()) and
-// `restExercise` (the exercise's name, for the "Rest over" banner). Everything shown is
+// `restExercise` (the exercise's name, passed to onRestScheduled). Everything shown is
 // worked out from restEndsAt and the current time, never counted down, so it is still right
 // after the app was closed and reopened, the phone was locked, or the device went offline.
 // A restEndsAt that has passed is simply not a rest any more; it is only removed from the
@@ -1585,12 +1565,12 @@ function setDefaultRest(seconds) {
 // ---- Hooks for push notifications (not built yet) ----
 //
 // Called when a rest starts on this device, and again when its end is moved with -15s or
-// +15s: `endsAt` is when it ends (ms, like Date.now()) and `exerciseName` the exercise for
-// "next set of ...". Each call replaces the one before, since there is only ever one rest.
+// +15s: `endsAt` is when it ends (ms, like Date.now()) and `exerciseName` the exercise whose
+// set started it. Each call replaces the one before, since there is only ever one rest.
 // Rests started or changed on another device don't call it (that device does).
-// A push service would schedule its "Rest over" notification for `endsAt`. While the app is
-// open and visible it shows its own banner when the rest ends, so a push arriving then
-// should not be shown as well.
+// A push service would schedule a notification for `endsAt` whose text is just "Rest over",
+// the same as the in-app banner. While the app is open and visible it shows that banner when
+// the rest ends, so a push arriving then should not be shown as well.
 function onRestScheduled(endsAt, exerciseName) {}
 
 // Called when a rest started on this device is stopped before its end: Skip, -15s with
@@ -1673,7 +1653,7 @@ function moveRestEnd(workout, ms) {
 // background, so it is also run on coming back to the app.
 
 let clock = null; // the workout clock on screen: { element, workoutId, startedAt, draw }, or null
-let watchedRest = null; // the running rest: { workoutId, endsAt, name }, or null
+let watchedRest = null; // the running rest: { workoutId, endsAt }, or null
 let tickTimer = null;
 
 // The running rest to watch, or null. There is normally at most one.
@@ -1681,7 +1661,7 @@ function findRunningRest(now) {
   let found = null;
   for (const workout of workouts.values()) {
     if (isResting(workout, now) && (!found || workout.restEndsAt > found.endsAt)) {
-      found = { workoutId: workout.id, endsAt: workout.restEndsAt, name: workout.restExercise ?? '' };
+      found = { workoutId: workout.id, endsAt: workout.restEndsAt };
     }
   }
   return found;
@@ -1699,10 +1679,9 @@ function tickClocks() {
       // Skipped, moved, restarted or finished, here or on another device: no alert.
       watchedRest = null;
     } else if (now >= endsAt) {
-      const { name } = watchedRest;
       watchedRest = null;
       if (now - endsAt <= REST_ALERT_GRACE) {
-        restOver(name);
+        restOver();
       }
     }
   }
@@ -1799,18 +1778,18 @@ function hideRestBanner() {
   restBanner.replaceChildren();
 }
 
-function showRestBanner(name) {
+function showRestBanner() {
   clearTimeout(restBannerTimer);
   restBanner.replaceChildren(
-    h('span', {}, name ? `Rest over: next set of ${name}` : 'Rest over'),
+    h('span', {}, 'Rest over'),
     h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Dismiss', onclick: hideRestBanner }, '×')
   );
   restBanner.hidden = false;
   restBannerTimer = setTimeout(hideRestBanner, 20 * 1000);
 }
 
-function restOver(name) {
-  showRestBanner(name);
+function restOver() {
+  showRestBanner();
   beep();
   try {
     navigator.vibrate?.([200, 100, 200]); // Android; iPhones have no vibrate()
@@ -2176,7 +2155,8 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           onclick: () => {
             openSet = {
               exerciseId: exercise.id,
-              weight: last ? shownWeight(last) : '',
+              // The previous set's weight exactly as it was stored, whatever unit is shown.
+              source: last ? sourceFromSet(last) : { text: '', unit: settings.unit },
               reps: last ? String(last.reps) : '',
             };
             redraw(`${card} input[name="weight"]`, true);
@@ -2187,6 +2167,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
 
     // Open: the weight/reps row, typed into with the in-app number pad.
     const setRow = () => {
+      const row = openSet;
       const weightInput = padInput(
         {
           name: 'weight',
@@ -2194,11 +2175,16 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           pattern: WEIGHT_PATTERN,
           title: 'A number, for example 62.5',
           placeholder: '0',
-          value: openSet.weight || null,
+          value: weightFieldText(row.source, settings.unit) || null,
         },
         'weight',
         { next: () => repsInput } // Enter and the pad's "Next" move on to reps
       );
+      // Anything typed (on the pad or a keyboard) becomes the weight, in the unit shown.
+      // Switching units after that converts from this, not from what the field shows.
+      weightInput.addEventListener('input', () => {
+        row.source = { text: weightInput.value, unit: settings.unit };
+      });
       const repsInput = padInput(
         {
           name: 'reps',
@@ -2220,12 +2206,11 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           onsubmit: (event) => {
             event.preventDefault();
             const reps = Math.floor(Number(repsInput.value));
-            // A weight left exactly as pre-filled is the previous set's weight, so store
-            // that set's own value and unit rather than a rounded conversion of it.
-            const unchanged = last && weightInput.value !== '' && weightInput.value === shownWeight(last);
-            const weight = unchanged ? last.weight : Number(weightInput.value) || 0;
-            const unit = unchanged ? unitOf(last) : settings.unit;
-            if (!(reps >= 1) || weight < 0) {
+            // The source, not the field's text: a weight left as pre-filled is stored as the
+            // previous set's own value and unit (5 lb stays 5 lb even while kg is shown), and
+            // a typed one as typed, in the unit it was typed in.
+            const { weight, unit } = weightToStore(row.source);
+            if (!(reps >= 1)) {
               return;
             }
             // `at`: when it was logged, which decides whether it counts towards hand-edited

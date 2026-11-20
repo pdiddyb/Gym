@@ -674,7 +674,7 @@ h1 + p {
   margin: 8px 0 0;
 }
 
-/* "Rest over: next set of Bench press", just under the header on any screen */
+/* "Rest over", just under the header on any screen */
 #rest-banner {
   position: fixed;
   top: calc(var(--bar-height, 68px) + 8px);

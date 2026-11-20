@@ -9,6 +9,7 @@ Live at https://gym.pwb-llc.com (static files on cPanel hosting).
 
 - `/UI` - the app: plain HTML/CSS/JavaScript, no build step. Upload the contents of this folder to the web root.
 - `firestore.rules` - Firestore security rules (each user can only read and write `users/{their uid}/...`). Published by pasting into the Firebase console, not by uploading to the web host.
+- `/tests` - tests for the app's plain logic (lb/kg weight fields). Run `node --test tests/` with Node 22.12 or later; nothing to install. Not uploaded.
 - `/SQL` - MySQL scripts left over from the removed PHP API. No longer used.
 
 ## Firebase setup
