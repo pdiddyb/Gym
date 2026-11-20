@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gym-pwa-v18';
+const CACHE_NAME = 'gym-pwa-v19';
 
 // The app's own files. Served from the cache straight away and refreshed in the background.
 const ASSETS = [
@@ -14,6 +14,13 @@ const ASSETS = [
   './icons/icon.svg',
 ];
 const PRECACHE_PATHS = new Set(ASSETS.map((asset) => new URL(asset, self.location.origin).pathname));
+
+// The app's files are always asked for with "no-cache": the browser checks with the server
+// and gets a quick "not modified" when nothing has changed, but never just takes its own
+// stored copy. The web host tells browsers they may keep JS and CSS for a week without asking,
+// so filling this cache from the browser's copy kept phones on an old version for days after
+// a new one was uploaded.
+const fromServer = (url) => new Request(url, { cache: 'no-cache' });
 
 // The Firebase SDK scripts, so the app still starts with no signal. These URLs contain the
 // version and their contents never change, so a cached copy is always correct.
@@ -32,7 +39,7 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) =>
       Promise.all([
-        cache.addAll(ASSETS),
+        cache.addAll(ASSETS.map(fromServer)),
         // Best effort: if Google's CDN can't be reached right now, the scripts are cached
         // the first time the page loads them instead.
         cache.addAll([...FIREBASE_SDK]).catch(() => {}),
@@ -82,10 +89,12 @@ self.addEventListener('fetch', (event) => {
 
   // App files: cached copy now, fresh copy fetched in the background for next time.
   // Looked up and stored by path alone, so "/?anything" reuses the one entry for "/".
+  // The refresh is a plain request for that path rather than the page's own request, which
+  // can't be given a cache mode when it is a page load.
   const cacheKey = requestUrl.origin + requestUrl.pathname;
   event.respondWith(
     caches.match(cacheKey).then((cached) => {
-      const networkFetch = fetch(event.request)
+      const networkFetch = fetch(fromServer(cacheKey))
         .then((response) => storeInCache(cacheKey, response))
         .catch(() => cached);
 

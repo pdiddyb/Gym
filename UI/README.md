@@ -10,9 +10,9 @@ Vanilla JavaScript Progressive Web App. No build step: these files are served as
   from that on every unit switch, so switching back and forth never changes the number. Tested
   by `/tests` at the top of the repo.
 - `firebase.js` Firebase setup: loads the SDK from Google's CDN, Auth, Firestore with offline persistence, and the workout read/write functions
-- `service-worker.js` offline cache for the app's own files only; Firebase scripts and API calls are never cached by it (bump `CACHE_NAME` when changing assets)
+- `service-worker.js` offline cache for the app's own files only; Firebase scripts and API calls are never cached by it (bump `CACHE_NAME` when changing assets). It always asks the server for the app's files (`cache: 'no-cache'`, a quick "not modified" when unchanged) instead of taking the browser's stored copy, so an upload shows on the second launch after it. Tested by `/tests`.
 - `manifest.webmanifest` PWA manifest
-- `.htaccess` HTTPS redirect and headers for the cPanel host
+- `.htaccess` HTTPS redirect and headers for the cPanel host, including `Cache-Control: no-cache` on HTML, JS, CSS and the manifest (the host's default lets browsers keep JS and CSS for a week)
 
 Data lives in Firestore under `users/{uid}/`:
 
