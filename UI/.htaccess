@@ -6,9 +6,14 @@ RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
 # Serve the manifest with the proper type.
 AddType application/manifest+json .webmanifest
 
-# Always re-check the service worker so app updates reach installed phones.
+# Browsers must check with the server before reusing the app's pages, code and styles (a
+# quick "not modified" reply when nothing changed), so installed phones pick up an upload
+# instead of a stored copy. The host's default lets browsers keep JS and CSS for a week
+# without asking, which kept phones on old versions. This covers service-worker.js too, which must
+# always be re-checked. The service worker keeps its own copy for offline use.
 <IfModule mod_headers.c>
-  <FilesMatch "^service-worker\.js$">
+  <FilesMatch "\.(html|js|css|webmanifest)$">
     Header set Cache-Control "no-cache"
+    Header unset Expires
   </FilesMatch>
 </IfModule>
