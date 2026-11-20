@@ -4,7 +4,7 @@ Vanilla JavaScript Progressive Web App. No build step: these files are served as
 
 - `index.html` entry page
 - `styles.css` styling
-- `app.js` screens (sign-in, home, history, workout, workout completed, exercise data, settings with the default rest length, outlines and backup export/import), the header (one dropdown menu component for the ⋮ and profile buttons; the gear opens Settings and closes it again), the rest timer, routing, Google sign-in redirect, one-time move of old device-only workouts into the account
+- `app.js` screens (sign-in, home, history, workout, workout completed, exercise data, settings with outlines and backup export/import), the header (one dropdown menu component for the ⋮ and profile buttons; the gear opens Settings and closes it again), the rest timer, routing, Google sign-in redirect, one-time move of old device-only workouts into the account
 - `units.js` lb/kg conversion, and the weight field logic for the add-set row: the field keeps the
   weight as typed (or as pre-filled from the previous set) with its unit, and shows it converted
   from that on every unit switch, so switching back and forth never changes the number. Tested
@@ -26,8 +26,8 @@ Data lives in Firestore under `users/{uid}/`:
 - `outlines/{outlineId}` saved outlines: `{ name, createdAt, exercises: [{ name, sets }] }`, the
   exercise names and set counts of a finished workout, with no weights. A workout can be started
   from one.
-- `settings/preferences` weight unit and other choices, including `restSeconds`, the default rest
-  timer length (2:00 until changed)
+- `settings/preferences` weight unit and other choices, including the rest timer: `restSeconds`
+  (its length) and `restOn` (whether logging a set starts it); 2:00 and on until changed
 - `exercises/{exerciseId}` the exercise library: one entry per exercise that is in any workout,
   with its last and heaviest set. It is worked out from the workouts (and kept up to date as
   sets are saved or deleted), and feeds the "Add exercise" suggestions and the Exercise data
@@ -42,14 +42,16 @@ Data lives in Firestore under `users/{uid}/`:
     every workout keeps its entry while it has an edited set.
   - `hidden: true`: removed from the suggestions and the Exercise data list until the exercise
     is used in a workout again.
-  - `rest: { on, seconds }`: the exercise's rest timer, each field written only once the user
-    changes it. No `on` means on; no `seconds` means the default from settings.
+  - `rest: { on, seconds }`, on entries from when each exercise had its own rest timer: no
+    longer read, and left as it is.
 
   None of this changes the workouts themselves.
 
 ## Rest timer
 
-Logging a set of an exercise whose rest timer is on starts a rest (or starts it again), saved as
+There is one rest timer for every exercise: the "Rest timer 2m 00s ✎" row with an on/off switch
+under the "In progress" line of a workout. Its length and switch are saved in the settings as
+soon as they change. While it is on, logging a set starts a rest (or starts it again), saved as
 `restEndsAt` on the workout. The countdown is always worked out from that time, so it survives
 closing the app, a locked phone and having no signal. While resting, the clock at the top of the
 workout reads "REST 02:29" with -15s, +15s and Skip, pinned under the header. When the rest ends

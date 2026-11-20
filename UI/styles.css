@@ -572,7 +572,7 @@ h1 + p {
   font-variant-numeric: tabular-nums;
 }
 
-/* "Rest timer 2m 30s ✎" and its switch, under an exercise's name */
+/* "Rest timer 2m 30s ✎" and its switch: the one rest timer, near the top of a workout */
 .rest-row {
   display: flex;
   align-items: center;
@@ -581,11 +581,16 @@ h1 + p {
   font-size: 0.9rem;
 }
 
+/* Under the "In progress" / lb-kg row, above the first exercise. */
+.workout-rest {
+  margin: -8px 0 8px;
+}
+
 .rest-row .switch {
   margin-left: auto;
 }
 
-/* The length, with a pencil: opens the "Rest timer duration" popup. Also in Settings. */
+/* The length, with a pencil: opens the "Rest timer duration" popup. */
 .rest-length {
   display: inline-flex;
   align-items: center;
@@ -668,10 +673,6 @@ h1 + p {
   .switch-knob {
     transition: none;
   }
-}
-
-.rest-settings p {
-  margin: 8px 0 0;
 }
 
 /* "Rest over", just under the header on any screen */
@@ -760,11 +761,6 @@ body:has(.picker[open]) {
   font-size: 1.15rem;
   letter-spacing: normal;
   text-transform: none;
-}
-
-.picker-subtitle {
-  margin: -12px 0 0;
-  overflow-wrap: anywhere;
 }
 
 .picker-hint {
