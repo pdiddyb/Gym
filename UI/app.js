@@ -1,6 +1,8 @@
 // Gym: workouts are saved to the signed-in user's Google account (Firestore, see firebase.js).
 // IndexedDB is only read to move workouts from older, device-only versions into the account.
 
+import { UNITS, convertWeight, roundForDisplay, unitOf, sourceFromSet, weightFieldText, weightToStore } from './units.js';
+
 // ---------- State ----------
 
 let fb = null; // the firebase.js module, once loaded
@@ -8,8 +10,9 @@ let user = null; // signed-in Firebase user, or null
 let workouts = new Map(); // id -> workout, kept current by a Firestore listener
 let workoutsReady = false;
 // Saved in the account. unit: lb until the user chooses otherwise. setHint: whether exercise
-// cards show the last set or the heaviest set ('last' or 'max').
-const DEFAULT_SETTINGS = { unit: 'lb', setHint: 'last' };
+// cards show the last set or the heaviest set ('last' or 'max'). restSeconds: the rest timer
+// length for exercises that haven't been given their own.
+const DEFAULT_SETTINGS = { unit: 'lb', setHint: 'last', restSeconds: 120 };
 let settings = { ...DEFAULT_SETTINGS };
 let settingsReady = false;
 let library = new Map(); // exercise key -> library entry, kept current by a Firestore listener
@@ -56,6 +59,7 @@ const ICONS = {
   backspace: '<path d="M21 5H9l-6 7 6 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z"/><path d="M17 9.5l-5 5M12 9.5l5 5"/>',
   // two arrows pointing opposite ways
   swap: '<path d="M7 4L3 8l4 4"/><path d="M3 8h14"/><path d="M17 12l4 4-4 4"/><path d="M21 16H7"/>',
+  pencil: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/>',
 };
 
 function icon(name) {
@@ -93,10 +97,11 @@ function formatDateTime(timestamp) {
 // showing their title.
 const workoutLabel = (workout) => workout.name || formatDateTime(workout.startedAt);
 
+const two = (value) => String(value).padStart(2, '0');
+
 // A running clock: "12:34", or "1:02:03" from an hour up.
 function formatClock(ms) {
   const seconds = Math.max(0, Math.floor(ms / 1000));
-  const two = (value) => String(value).padStart(2, '0');
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
   return hours ? `${hours}:${two(minutes)}:${two(seconds % 60)}` : `${minutes}:${two(seconds % 60)}`;
@@ -114,26 +119,27 @@ function formatDuration(ms) {
 
 const workoutDuration = (workout) => formatDuration(workout.finishedAt - workout.startedAt);
 
-// ---------- Weight units ----------
-//
-// Every set is stored exactly as it was entered: { weight, unit }. Sets saved before units
-// existed have no unit and are kilograms. Converting only ever happens on the way to the
-// screen; stored values are never rewritten.
-
-const UNITS = ['lb', 'kg'];
-const KG_PER_LB = 0.45359237;
-
-const unitOf = (set) => (set.unit === 'lb' ? 'lb' : 'kg');
-
-function convertWeight(weight, from, to) {
-  if (from === to) {
-    return weight;
-  }
-  return from === 'lb' ? weight * KG_PER_LB : weight / KG_PER_LB;
+// A rest timer length: "2m 30s", or "45s" under a minute.
+function formatRestLength(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  return minutes ? `${minutes}m ${two(seconds % 60)}s` : `${seconds}s`;
 }
 
-// One decimal place, without a trailing ".0".
-const roundForDisplay = (weight) => String(Math.round(weight * 10) / 10);
+// The same in words, for screen readers: "2 minutes 30 seconds".
+function restLengthWords(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  return [minutes && plural(minutes, 'minute'), seconds % 60 && plural(seconds % 60, 'second')].filter(Boolean).join(' ');
+}
+
+// Rest left: "02:29". Rounded up, so it reads 00:01 in the last second, not 00:00.
+function formatCountdown(ms) {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  return `${two(Math.floor(seconds / 60))}:${two(seconds % 60)}`;
+}
+
+// ---------- Weight units ----------
+//
+// The conversions themselves are in units.js.
 
 // A set's weight as text in the user's current unit (or the unit given). Shown exactly when
 // it was entered in that unit, rounded when it has to be converted.
@@ -795,7 +801,8 @@ document.addEventListener('pointerdown', (event) => {
   }
 }, true);
 document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape') {
+  // Escape in a popup (the rest timer duration) closes just that popup.
+  if (event.key !== 'Escape' || event.target.closest?.('dialog')) {
     return;
   }
   if (openMenu) {
@@ -812,6 +819,19 @@ window.addEventListener('resize', () => openMenu?.place());
 
 const authSlot = h('span', { id: 'auth', class: 'row' });
 (document.getElementById('header-actions') ?? document.querySelector('.bar')).append(authSlot);
+
+// The header's height as --bar-height, for what is pinned just under it: the rest timer
+// and the "Rest over" banner. It changes with the notch insets and when the phone turns.
+{
+  const bar = document.querySelector('.bar');
+  const measure = () => document.documentElement.style.setProperty('--bar-height', `${bar.getBoundingClientRect().height}px`);
+  measure();
+  if (window.ResizeObserver) {
+    new ResizeObserver(measure).observe(bar);
+  } else {
+    window.addEventListener('resize', measure);
+  }
+}
 
 let settingsButton = null; // the gear, while signed in
 
@@ -1023,11 +1043,22 @@ document.body.append(pad);
 
 const isPadField = (element) => element instanceof HTMLInputElement && element.hasAttribute('data-pad');
 
+// The bottom edge of what is pinned to the top of the screen: the header, and the rest
+// timer while it counts down. Either may have scrolled away (the header stops sticking on
+// short landscape screens while the pad is up).
+function pinnedBottom() {
+  return Math.max(
+    0,
+    ...[document.querySelector('.bar'), view.querySelector('.workout-clock.resting')].map(
+      (element) => element?.getBoundingClientRect().bottom ?? 0
+    )
+  );
+}
+
 // Scrolls just enough that the field sits between the header and the pad.
 function revealPadField(field) {
   const rect = field.getBoundingClientRect();
-  // The header may have scrolled away (it stops sticking on short landscape screens).
-  const headerBottom = Math.max(0, document.querySelector('.bar')?.getBoundingClientRect().bottom ?? 0);
+  const headerBottom = pinnedBottom();
   const lowest = window.innerHeight - pad.offsetHeight - 12;
   if (rect.bottom > lowest) {
     window.scrollBy(0, rect.bottom - lowest);
@@ -1230,21 +1261,12 @@ const REPS_PATTERN = '0*[1-9][0-9]*';
 // The lb / kg switch, used on the workout screen and in Settings. It changes the saved
 // setting: the unit weights are shown in, and the unit new sets are stored with.
 function setUnit(unit) {
-  const previous = settings.unit;
-  if (unit === previous) {
+  if (unit === settings.unit) {
     return;
   }
-  // A weight already typed into the open row was typed in the old unit; carry it across.
-  rememberOpenSetValues();
-  const typed = Number(openSet?.weight);
-  if (openSet && openSet.weight !== '' && Number.isFinite(typed)) {
-    openSet.weight = roundForDisplay(convertWeight(typed, previous, unit));
-    // Put it in the field too: the redraw that follows reads the row's values back from it.
-    const field = view.querySelector('form.add-set')?.elements.weight;
-    if (field) {
-      field.value = openSet.weight;
-    }
-  }
+  // Nothing in the open add-set row is converted here: it keeps its weight as typed, with the
+  // unit it was typed in (openSet.source), and the redraw that follows shows that in the new
+  // unit.
   settings = { ...settings, unit };
   fb.saveSettings(user.uid, { unit }).catch(reportSaveError);
 }
@@ -1294,7 +1316,7 @@ function revealExerciseList() {
   const viewport = window.visualViewport;
   const visibleBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
   const rect = form.getBoundingClientRect();
-  const headerBottom = Math.max(0, document.querySelector('.bar')?.getBoundingClientRect().bottom ?? 0);
+  const headerBottom = pinnedBottom();
   const hidden = rect.bottom + 8 - visibleBottom;
   const room = rect.top - headerBottom - 8; // never push the box itself under the header
   if (hidden > 0 && room > 0) {
@@ -1462,39 +1484,608 @@ function addExerciseForm(workout, add) {
 // Which exercise has its "add a set" row open, and what has been typed into it so far.
 // Only one can be open at a time. This lives in memory only (it is never saved to the
 // account), so the row stays open, with its values, when the screen is redrawn after a save.
-let openSet = null; // { exerciseId, weight, reps } or null
+// { exerciseId, source, reps } or null. `source` is the weight as { text, unit } (see units.js):
+// the previous set's stored weight and unit when the row opens, then whatever is typed, in the
+// unit it is typed in. The weight field always shows the source in the current unit.
+let openSet = null;
 
+// Reads the reps back from the open row before a redraw. The weight needs no reading: the
+// source is updated as it is typed (see setRow in renderWorkout).
 function rememberOpenSetValues() {
   const form = view.querySelector('form.add-set');
   if (openSet && form?.dataset.exercise === openSet.exerciseId) {
-    openSet.weight = form.elements.weight.value;
     openSet.reps = form.elements.reps.value;
   }
 }
 
-// The clock at the top of a workout in progress. It is always worked out from startedAt,
-// so it is right after the app was closed, the phone slept, or the page was redrawn.
-let timerId = null;
+// ---------- Rest timer ----------
+//
+// Each exercise has a rest timer that is on or off and has a length. Both are kept on its
+// exercise library entry as `rest: { on, seconds }`, each field written only once the user
+// has changed it: an exercise with no `on` has its timer on, and one with no `seconds` uses
+// the default length from Settings (settings.restSeconds).
+//
+// Logging a set of an exercise whose timer is on starts a rest. The rest is saved on the
+// workout in progress as `restEndsAt` (when it ends, in ms like Date.now()) and
+// `restExercise` (the exercise's name, passed to onRestScheduled). Everything shown is
+// worked out from restEndsAt and the current time, never counted down, so it is still right
+// after the app was closed and reopened, the phone was locked, or the device went offline.
+// A restEndsAt that has passed is simply not a rest any more; it is only removed from the
+// workout by Skip and by finishing the workout.
 
-function stopTimer() {
-  clearInterval(timerId);
-  timerId = null;
+const REST_STEP = 5; // seconds; the seconds wheel moves in these
+const REST_MAX_MINUTES = 15;
+// A rest that ended while the phone was locked or the app was in the background still gets
+// its alert on coming back, if that is within this long of the end. Later than that, the
+// clock just shows the workout time again.
+const REST_ALERT_GRACE = 60 * 1000;
+
+// A rest length in seconds if it is one the picker could have chosen, otherwise null.
+const cleanRestSeconds = (value) =>
+  Number.isInteger(value) && value >= REST_STEP && value <= REST_MAX_MINUTES * 60 + 60 - REST_STEP && value % REST_STEP === 0
+    ? value
+    : null;
+
+// The usable fields of a stored `rest`.
+function storedRest(rest) {
+  const fields = {};
+  if (typeof rest?.on === 'boolean') {
+    fields.on = rest.on;
+  }
+  if (cleanRestSeconds(rest?.seconds)) {
+    fields.seconds = rest.seconds;
+  }
+  return fields;
 }
 
-function elapsedTimer(startedAt) {
-  const clock = h('div', { class: 'timer', role: 'timer', 'aria-label': 'Elapsed time' });
-  const tick = () => {
-    clock.textContent = formatClock(Date.now() - startedAt);
+// { on, seconds }: an exercise's rest timer, with the defaults filled in.
+function restSettingFor(name) {
+  const rest = storedRest(library.get(exerciseKey(name))?.rest);
+  return { on: rest.on ?? true, seconds: rest.seconds ?? settings.restSeconds };
+}
+
+// Saves a change ({ on } or { seconds }) to an exercise's rest timer in its library entry.
+// Only `rest` is written, so nothing else on the entry can be overwritten.
+function saveRestSetting(name, changes) {
+  const key = exerciseKey(name);
+  const existing = library.get(key);
+  const rest = { ...storedRest(existing?.rest), ...changes };
+  // The entry is normally made when the exercise is added to a workout; this covers a
+  // library that couldn't be loaded.
+  const write = existing ? { id: existing.id, rest } : { id: exerciseDocId(key), name, key, rest };
+  library.set(key, { ...(existing ?? write), rest });
+  fb.saveExercises(user.uid, [write]).catch(reportSaveError);
+}
+
+function setDefaultRest(seconds) {
+  settings = { ...settings, restSeconds: seconds };
+  fb.saveSettings(user.uid, { restSeconds: seconds }).catch(reportSaveError);
+}
+
+// ---- Hooks for push notifications (not built yet) ----
+//
+// Called when a rest starts on this device, and again when its end is moved with -15s or
+// +15s: `endsAt` is when it ends (ms, like Date.now()) and `exerciseName` the exercise whose
+// set started it. Each call replaces the one before, since there is only ever one rest.
+// Rests started or changed on another device don't call it (that device does).
+// A push service would schedule a notification for `endsAt` whose text is just "Rest over",
+// the same as the in-app banner. While the app is open and visible it shows that banner when
+// the rest ends, so a push arriving then should not be shown as well.
+function onRestScheduled(endsAt, exerciseName) {}
+
+// Called when a rest started on this device is stopped before its end: Skip, -15s with
+// less than 15 seconds left, or finishing or deleting the workout. A push service would
+// cancel the scheduled notification.
+function onRestCancelled() {}
+
+// A bug in a hook must never stop a set from being logged.
+function callRestHook(hook, ...args) {
+  try {
+    hook(...args);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Saves a change to the workout's rest fields. The exercises are unchanged, so the exercise
+// library needs no update.
+function saveRestState(workout) {
+  workouts.set(workout.id, workout);
+  fb.saveWorkout(user.uid, workout).catch(reportSaveError);
+  tickClocks();
+}
+
+// Starts (or restarts) a rest after a set of `name` was logged, if its timer is on. Only
+// changes the workout object; the caller saves it along with the new set.
+function startRest(workout, name) {
+  const { on, seconds } = restSettingFor(name);
+  if (!on || workout.finishedAt) {
+    return;
+  }
+  workout.restEndsAt = Date.now() + seconds * 1000;
+  workout.restExercise = name;
+  hideRestBanner();
+  callRestHook(onRestScheduled, workout.restEndsAt, name);
+}
+
+// The rest on the workout, if it is still running.
+const isResting = (workout, now = Date.now()) => !workout.finishedAt && Number.isFinite(workout.restEndsAt) && workout.restEndsAt > now;
+
+// Takes the rest off the workout object. Returns whether a rest was running.
+function clearRest(workout) {
+  const wasResting = isResting(workout);
+  delete workout.restEndsAt;
+  delete workout.restExercise;
+  if (wasResting) {
+    callRestHook(onRestCancelled);
+  }
+  return wasResting;
+}
+
+// Skip: ends the rest now, without the "Rest over" alert.
+function skipRest(workout) {
+  clearRest(workout);
+  saveRestState(workout);
+}
+
+// -15s and +15s. Taking off more than is left ends the rest, like Skip.
+function moveRestEnd(workout, ms) {
+  // The saved copy: the rest may have been moved on another device since this screen was drawn.
+  const live = workouts.get(workout.id) ?? workout;
+  if (!isResting(live)) {
+    return;
+  }
+  const endsAt = live.restEndsAt + ms;
+  if (endsAt - Date.now() < 1000) {
+    skipRest(workout);
+    return;
+  }
+  workout.restEndsAt = endsAt;
+  workout.restExercise = live.restExercise;
+  saveRestState(workout);
+  callRestHook(onRestScheduled, endsAt, workout.restExercise ?? '');
+}
+
+// ---- The ticking: the workout clock on screen, and noticing when a rest ends ----
+//
+// One timer drives both. It runs while the workout clock is on screen or a rest is running,
+// and fires when either next changes its whole second. Browsers slow or pause timers in the
+// background, so it is also run on coming back to the app.
+
+let clock = null; // the workout clock on screen: { element, workoutId, startedAt, draw }, or null
+let watchedRest = null; // the running rest: { workoutId, endsAt }, or null
+let tickTimer = null;
+
+// The running rest to watch, or null. There is normally at most one.
+function findRunningRest(now) {
+  let found = null;
+  for (const workout of workouts.values()) {
+    if (isResting(workout, now) && (!found || workout.restEndsAt > found.endsAt)) {
+      found = { workoutId: workout.id, endsAt: workout.restEndsAt };
+    }
+  }
+  return found;
+}
+
+function tickClocks() {
+  clearTimeout(tickTimer);
+  tickTimer = null;
+  const now = Date.now();
+
+  if (watchedRest) {
+    const workout = workouts.get(watchedRest.workoutId);
+    const endsAt = workout && !workout.finishedAt ? workout.restEndsAt : null;
+    if (endsAt !== watchedRest.endsAt) {
+      // Skipped, moved, restarted or finished, here or on another device: no alert.
+      watchedRest = null;
+    } else if (now >= endsAt) {
+      watchedRest = null;
+      if (now - endsAt <= REST_ALERT_GRACE) {
+        restOver();
+      }
+    }
+  }
+  watchedRest ??= findRunningRest(now);
+
+  if (clock && !clock.element.isConnected) {
+    clock = null;
+  }
+  clock?.draw(now);
+
+  const waits = [];
+  if (watchedRest) {
+    waits.push((watchedRest.endsAt - now) % 1000 || 1000);
+  }
+  if (clock) {
+    waits.push(1000 - ((now - clock.startedAt) % 1000));
+  }
+  if (waits.length) {
+    // A little after the second turns over, so the new value is already due.
+    tickTimer = setTimeout(tickClocks, Math.min(...waits) + 20);
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    tickClocks();
+  }
+});
+window.addEventListener('pageshow', tickClocks);
+
+// The clock at the top of a workout in progress: the time since it started, or while
+// resting, "REST 02:29" with -15s, +15s and Skip. While resting it stays pinned under the
+// header, so the buttons can be reached from anywhere on the page.
+function workoutClock(workout) {
+  // Focused from code when Skip (which had focus) goes away; never reached with Tab.
+  const element = h('div', { class: 'workout-clock', tabindex: '-1' });
+  let mode = null; // 'elapsed' or 'rest', what is drawn
+  let time = null; // the element showing the digits
+
+  const restButton = (label, name, onclick) =>
+    h('button', { class: 'btn secondary', type: 'button', 'aria-label': name, onclick }, label);
+
+  const draw = (now) => {
+    // The saved copy, which follows changes made on another device.
+    const live = workouts.get(workout.id) ?? workout;
+    const resting = isResting(live, now);
+    if (mode !== (resting ? 'rest' : 'elapsed')) {
+      const hadFocus = element.contains(document.activeElement);
+      mode = resting ? 'rest' : 'elapsed';
+      element.classList.toggle('resting', resting);
+      if (resting) {
+        time = h('span', { class: 'rest-left' });
+        element.replaceChildren(
+          h(
+            'div',
+            { class: 'timer rest-timer', role: 'timer', 'aria-label': 'Rest left' },
+            h('span', { class: 'rest-word', 'aria-hidden': 'true' }, 'REST'),
+            time
+          ),
+          h(
+            'div',
+            { class: 'rest-controls' },
+            restButton('−15s', '15 seconds less rest', () => moveRestEnd(workout, -15000)),
+            restButton('+15s', '15 seconds more rest', () => moveRestEnd(workout, 15000)),
+            restButton('Skip', 'Skip rest', () => skipRest(workout))
+          )
+        );
+      } else {
+        time = h('div', { class: 'timer', role: 'timer', 'aria-label': 'Elapsed time' });
+        element.replaceChildren(time);
+      }
+      if (hadFocus) {
+        element.focus({ preventScroll: true });
+      }
+    }
+    time.textContent = resting ? formatCountdown(live.restEndsAt - now) : formatClock(now - live.startedAt);
   };
-  tick();
-  stopTimer();
-  timerId = setInterval(() => (clock.isConnected ? tick() : stopTimer()), 1000);
-  return clock;
+
+  clock = { element, workoutId: workout.id, startedAt: workout.startedAt, draw };
+  draw(Date.now());
+  return element;
+}
+
+// ---- When a rest ends with the app open: banner, beep, vibration ----
+
+// Fixed under the header, on whichever screen is showing.
+const restBanner = h('div', { id: 'rest-banner', role: 'alert', hidden: true });
+document.body.append(restBanner);
+let restBannerTimer = null;
+
+function hideRestBanner() {
+  clearTimeout(restBannerTimer);
+  restBanner.hidden = true;
+  restBanner.replaceChildren();
+}
+
+function showRestBanner() {
+  clearTimeout(restBannerTimer);
+  restBanner.replaceChildren(
+    h('span', {}, 'Rest over'),
+    h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Dismiss', onclick: hideRestBanner }, '×')
+  );
+  restBanner.hidden = false;
+  restBannerTimer = setTimeout(hideRestBanner, 20 * 1000);
+}
+
+function restOver() {
+  showRestBanner();
+  beep();
+  try {
+    navigator.vibrate?.([200, 100, 200]); // Android; iPhones have no vibrate()
+  } catch {
+    // Not allowed here; the banner and beep still happen.
+  }
+}
+
+// Browsers only let a page make sound once the user has interacted with it, so the audio
+// context is made (or woken, after iOS suspends it in the background) on a tap or key
+// press, never before. Until then the beep is silent and the banner alone shows.
+let audio = null;
+
+function unlockAudio() {
+  if (audio?.state === 'running') {
+    return;
+  }
+  const Context = window.AudioContext || window.webkitAudioContext;
+  if (!Context) {
+    return;
+  }
+  try {
+    audio ??= new Context();
+    audio.resume().catch(() => {});
+    // Older iOS only lets sound start from a sound begun inside a tap; a silent one does it.
+    const source = audio.createBufferSource();
+    source.buffer = audio.createBuffer(1, 1, 22050);
+    source.connect(audio.destination);
+    source.start(0);
+  } catch {
+    // No sound on this device; the banner still shows.
+  }
+}
+// The events browsers count as the user interacting.
+['pointerup', 'touchend', 'click', 'keydown'].forEach((type) =>
+  document.addEventListener(type, unlockAudio, { capture: true, passive: true })
+);
+
+// Three short pips, about half a second in all.
+function beep() {
+  if (!audio) {
+    return; // no interaction yet, so no sound is allowed
+  }
+  const play = () => {
+    const start = audio.currentTime + 0.02;
+    [0, 0.18, 0.36].forEach((offset) => {
+      const at = start + offset;
+      const tone = audio.createOscillator();
+      const volume = audio.createGain();
+      tone.type = 'sine';
+      tone.frequency.value = 880;
+      // Faded in and out over 10 ms so it doesn't click.
+      volume.gain.setValueAtTime(0, at);
+      volume.gain.linearRampToValueAtTime(0.35, at + 0.01);
+      volume.gain.setValueAtTime(0.35, at + 0.11);
+      volume.gain.linearRampToValueAtTime(0, at + 0.12);
+      tone.connect(volume).connect(audio.destination);
+      tone.start(at);
+      tone.stop(at + 0.13);
+    });
+  };
+  if (audio.state === 'running') {
+    play();
+    return;
+  }
+  // Suspended in the background: try to wake it, but a beep that only comes much later,
+  // at the next tap, would be confusing, so give up after a moment.
+  const askedAt = Date.now();
+  audio
+    .resume()
+    .then(() => {
+      if (Date.now() - askedAt < 1000) {
+        play();
+      }
+    })
+    .catch(() => {});
+}
+
+// ---- "Rest timer duration" popup: minute and second wheels ----
+
+const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+// One scroll wheel. It works like a spin button: Up and Down arrows step through the
+// values, Home and End go to the ends, and tapping a value scrolls it to the middle.
+// `unit` names one value and many: ['minute', 'minutes'].
+function wheel({ label, unit, values, value, format, onChange }) {
+  let index = Math.max(0, values.indexOf(value));
+  const items = values.map((item, position) =>
+    h('div', { class: 'wheel-item', 'data-index': String(position), 'aria-hidden': 'true' }, format(item))
+  );
+  // Room above the first value and below the last, so each can scroll to the middle.
+  const spacer = () => h('div', { class: 'wheel-spacer', 'aria-hidden': 'true' });
+  const element = h(
+    'div',
+    {
+      class: 'wheel',
+      role: 'spinbutton',
+      tabindex: '0',
+      'aria-label': label,
+      'aria-valuemin': String(values[0]),
+      'aria-valuemax': String(values[values.length - 1]),
+    },
+    spacer(),
+    items,
+    spacer()
+  );
+
+  const rowHeight = () => items[0].getBoundingClientRect().height || 40;
+
+  // `scroll` is false (the wheel is already there), 'auto' (jump) or 'smooth'.
+  const select = (position, scroll) => {
+    index = Math.max(0, Math.min(values.length - 1, position));
+    element.setAttribute('aria-valuenow', String(values[index]));
+    element.setAttribute('aria-valuetext', `${values[index]} ${unit[values[index] === 1 ? 0 : 1]}`);
+    items.forEach((item, position) => item.classList.toggle('selected', position === index));
+    if (scroll) {
+      element.scrollTo({ top: index * rowHeight(), behavior: scroll });
+    }
+    onChange();
+  };
+
+  // Scroll snapping settles the wheel on a value; the one in the middle is the choice.
+  element.addEventListener(
+    'scroll',
+    () => {
+      const position = Math.round(element.scrollTop / rowHeight());
+      if (position !== index) {
+        select(position, false);
+      }
+    },
+    { passive: true }
+  );
+  element.addEventListener('keydown', (event) => {
+    const targets = { ArrowUp: index + 1, ArrowDown: index - 1, Home: 0, End: values.length - 1 };
+    if (event.key in targets) {
+      event.preventDefault();
+      select(targets[event.key], 'auto');
+    }
+  });
+  element.addEventListener('click', (event) => {
+    const item = event.target.closest?.('.wheel-item');
+    if (item) {
+      select(Number(item.dataset.index), reducedMotion() ? 'auto' : 'smooth');
+    }
+  });
+
+  select(index, false);
+  return {
+    element,
+    get value() {
+      return values[index];
+    },
+    // Scrolls to the starting value; only possible once the wheel is on screen.
+    place: () => select(index, 'auto'),
+  };
+}
+
+// Opens the popup. `subtitle` says what the length is for; `onConfirm` gets the chosen
+// length in seconds. Cancel, Escape or a tap outside closes it without a change.
+function pickRestLength({ subtitle, seconds, onConfirm }) {
+  closeMenus();
+  closePad();
+
+  let minutes = null;
+  let secs = null;
+  const total = () => minutes.value * 60 + secs.value;
+  const confirm = h('button', { class: 'btn grow', value: 'confirm' }, 'Confirm');
+  const hint = h('p', { class: 'muted picker-hint', 'aria-live': 'polite' });
+  const update = () => {
+    if (!minutes || !secs) {
+      return; // still being built
+    }
+    const tooShort = total() < REST_STEP;
+    confirm.disabled = tooShort;
+    hint.textContent = tooShort ? `Choose at least ${REST_STEP} seconds.` : '';
+  };
+
+  minutes = wheel({
+    label: 'Minutes',
+    unit: ['minute', 'minutes'],
+    values: Array.from({ length: REST_MAX_MINUTES + 1 }, (_, n) => n),
+    value: Math.min(REST_MAX_MINUTES, Math.floor(seconds / 60)),
+    format: String,
+    onChange: update,
+  });
+  secs = wheel({
+    label: 'Seconds',
+    unit: ['second', 'seconds'],
+    values: Array.from({ length: 60 / REST_STEP }, (_, n) => n * REST_STEP),
+    value: Math.min(60 - REST_STEP, Math.round((seconds % 60) / REST_STEP) * REST_STEP),
+    format: two,
+    onChange: update,
+  });
+  minutes.element.setAttribute('autofocus', '');
+  update();
+
+  const column = (control, unitLabel) =>
+    h('div', { class: 'wheel-column' }, control.element, h('span', { class: 'wheel-unit', 'aria-hidden': 'true' }, unitLabel));
+
+  // method="dialog": Confirm closes the popup with returnValue "confirm".
+  const dialog = h(
+    'dialog',
+    { class: 'picker', 'aria-labelledby': 'picker-title' },
+    h(
+      'form',
+      { method: 'dialog' },
+      h('h2', { class: 'picker-title', id: 'picker-title' }, 'Rest timer duration'),
+      subtitle && h('p', { class: 'muted picker-subtitle' }, subtitle),
+      h('div', { class: 'wheels' }, column(minutes, 'min'), column(secs, 'sec')),
+      hint,
+      h(
+        'div',
+        { class: 'row' },
+        h('button', { class: 'btn secondary grow', type: 'button', onclick: () => dialog.close() }, 'Cancel'),
+        confirm
+      )
+    )
+  );
+
+  // A tap on the dimmed page around the popup closes it. Both the press and the release
+  // must be outside, so a drag that starts on a wheel and ends outside doesn't.
+  let pressedOutside = false;
+  dialog.addEventListener('pointerdown', (event) => {
+    pressedOutside = event.target === dialog;
+  });
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog && pressedOutside) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener('close', () => {
+    dialog.remove();
+    if (dialog.returnValue === 'confirm') {
+      onConfirm(total());
+    }
+  });
+
+  document.body.append(dialog);
+  dialog.showModal();
+  minutes.place();
+  secs.place();
+}
+
+// The row under an exercise's name: "Rest timer 2m 30s ✎" and an on/off switch. Both
+// change the exercise's library entry, so the next workout has them too. Changes take
+// effect from the next set; a rest already running carries on.
+function restRow(exercise) {
+  let { on, seconds } = restSettingFor(exercise.name);
+
+  const length = h('span', {});
+  const lengthButton = h('button', {
+    class: 'rest-length',
+    type: 'button',
+    onclick: () =>
+      pickRestLength({
+        subtitle: exercise.name,
+        seconds,
+        onConfirm: (chosen) => {
+          seconds = chosen;
+          saveRestSetting(exercise.name, { seconds });
+          show();
+        },
+      }),
+  });
+  lengthButton.append(length, icon('pencil'));
+
+  const toggle = h(
+    'button',
+    {
+      class: 'switch',
+      type: 'button',
+      role: 'switch',
+      'aria-label': `Rest timer for ${exercise.name}`,
+      onclick: () => {
+        on = !on;
+        saveRestSetting(exercise.name, { on });
+        show();
+      },
+    },
+    h('span', { class: 'switch-knob' })
+  );
+
+  const row = h('div', { class: 'rest-row' }, h('span', { class: 'rest-label' }, 'Rest timer'), lengthButton, toggle);
+  const show = () => {
+    row.classList.toggle('off', !on);
+    length.textContent = formatRestLength(seconds);
+    lengthButton.setAttribute('aria-label', `Rest timer duration for ${exercise.name}: ${restLengthWords(seconds)}. Change`);
+    toggle.setAttribute('aria-checked', String(on));
+  };
+  show();
+  return row;
 }
 
 function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
   rememberOpenSetValues();
-  stopTimer();
+  clock = null;
   closePad();
   closeExerciseList?.();
   if (openSet && !workout.exercises.some((exercise) => exercise.id === openSet.exerciseId)) {
@@ -1564,7 +2155,8 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           onclick: () => {
             openSet = {
               exerciseId: exercise.id,
-              weight: last ? shownWeight(last) : '',
+              // The previous set's weight exactly as it was stored, whatever unit is shown.
+              source: last ? sourceFromSet(last) : { text: '', unit: settings.unit },
               reps: last ? String(last.reps) : '',
             };
             redraw(`${card} input[name="weight"]`, true);
@@ -1575,6 +2167,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
 
     // Open: the weight/reps row, typed into with the in-app number pad.
     const setRow = () => {
+      const row = openSet;
       const weightInput = padInput(
         {
           name: 'weight',
@@ -1582,11 +2175,16 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           pattern: WEIGHT_PATTERN,
           title: 'A number, for example 62.5',
           placeholder: '0',
-          value: openSet.weight || null,
+          value: weightFieldText(row.source, settings.unit) || null,
         },
         'weight',
         { next: () => repsInput } // Enter and the pad's "Next" move on to reps
       );
+      // Anything typed (on the pad or a keyboard) becomes the weight, in the unit shown.
+      // Switching units after that converts from this, not from what the field shows.
+      weightInput.addEventListener('input', () => {
+        row.source = { text: weightInput.value, unit: settings.unit };
+      });
       const repsInput = padInput(
         {
           name: 'reps',
@@ -1608,17 +2206,19 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           onsubmit: (event) => {
             event.preventDefault();
             const reps = Math.floor(Number(repsInput.value));
-            // A weight left exactly as pre-filled is the previous set's weight, so store
-            // that set's own value and unit rather than a rounded conversion of it.
-            const unchanged = last && weightInput.value !== '' && weightInput.value === shownWeight(last);
-            const weight = unchanged ? last.weight : Number(weightInput.value) || 0;
-            const unit = unchanged ? unitOf(last) : settings.unit;
-            if (!(reps >= 1) || weight < 0) {
+            // The source, not the field's text: a weight left as pre-filled is stored as the
+            // previous set's own value and unit (5 lb stays 5 lb even while kg is shown), and
+            // a typed one as typed, in the unit it was typed in.
+            const { weight, unit } = weightToStore(row.source);
+            if (!(reps >= 1)) {
               return;
             }
             // `at`: when it was logged, which decides whether it counts towards hand-edited
             // stats in the exercise library.
             exercise.sets.push({ id: newId(), weight, unit, reps, at: Date.now() });
+            // Starts the rest, or starts it again, if this exercise's timer is on. Saved
+            // with the set below.
+            startRest(workout, exercise.name);
             openSet = null; // back to the "+ Add set" button; the next set is opened by hand
             commit(`${card} .open-set`, { used: [exercise.name] });
           },
@@ -1666,6 +2266,8 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
           '×'
         )
       ),
+      // Rests only happen in a workout in progress.
+      !workout.finishedAt && restRow(exercise),
       exercise.sets.length
         ? h(
             'ol',
@@ -1712,7 +2314,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
 
   view.replaceChildren(
     h('a', { class: 'back', href: '#/' }, '← All workouts'),
-    ...(workout.finishedAt ? [] : [elapsedTimer(workout.startedAt)]),
+    ...(workout.finishedAt ? [] : [workoutClock(workout)]),
     h('h1', {}, workoutLabel(workout)),
     h(
       'div',
@@ -1742,6 +2344,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
             class: 'btn block finish',
             type: 'button',
             onclick: () => {
+              clearRest(workout);
               workout.finishedAt = Date.now();
               saveWorkout(workout);
               location.hash = `#/done/${workout.id}`;
@@ -1758,6 +2361,7 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
             if (!confirm(`Delete the workout from ${workoutLabel(workout)}? This can't be undone.`)) {
               return;
             }
+            clearRest(workout);
             deleteWorkout(workout.id);
             location.hash = '#/';
           },
@@ -1774,6 +2378,8 @@ function renderWorkout(workout, focusSelector, openPadOnFocus = false) {
   } else if (focusTarget) {
     focusWithoutPad(focusTarget);
   }
+  // Keeps the new clock ticking, and picks up a rest the set just started.
+  tickClocks();
 }
 
 // ---------- Workout completed ----------
@@ -2309,6 +2915,40 @@ function outlineSettingsCard(outline) {
   );
 }
 
+// The default rest timer length, used by every exercise that hasn't been given its own.
+function defaultRestCard() {
+  const length = h('span', {});
+  const button = h('button', {
+    class: 'rest-length default-rest',
+    type: 'button',
+    onclick: () =>
+      pickRestLength({
+        subtitle: 'Default for exercises without their own',
+        seconds: settings.restSeconds,
+        onConfirm: (seconds) => {
+          setDefaultRest(seconds);
+          show();
+        },
+      }),
+  });
+  button.append(length, icon('pencil'));
+  const show = () => {
+    length.textContent = formatRestLength(settings.restSeconds);
+    button.setAttribute('aria-label', `Default rest timer: ${restLengthWords(settings.restSeconds)}. Change`);
+  };
+  show();
+  return h(
+    'div',
+    { class: 'card rest-settings' },
+    h('div', { class: 'row' }, h('strong', { class: 'grow' }, 'Default length'), button),
+    h(
+      'p',
+      { class: 'muted' },
+      "Used by exercises you haven't set a length for. Logging a set starts the rest; change an exercise's own length, or switch its timer off, under its name in a workout."
+    )
+  );
+}
+
 function renderSettings(backupMessage, outlineMessage) {
   const saved = sortedOutlines();
   const fileInput = h('input', {
@@ -2361,6 +3001,8 @@ function renderSettings(backupMessage, outlineMessage) {
         'Weights are shown in this unit and new sets are saved in it. Sets you already logged keep the unit they were entered in and are converted for display.'
       )
     ),
+    h('h2', {}, 'Rest timer'),
+    defaultRestCard(),
     h('h2', {}, 'Outlines'),
     ...(saved.length
       ? saved.map(outlineSettingsCard)
@@ -2410,7 +3052,7 @@ function route() {
     editingExercise = null;
     exerciseStatus = '';
   }
-  stopTimer();
+  clock = null; // renderWorkout makes a new one
   closePad();
   closeExerciseList?.();
   updateHeaderState();
@@ -2472,6 +3114,8 @@ function onUserChanged(nextUser) {
   libraryReady = false;
   outlines = new Map();
   outlinesReady = false;
+  watchedRest = null;
+  hideRestBanner();
   renderHeader();
   route();
   if (!user) {
@@ -2490,6 +3134,8 @@ function onUserChanged(nextUser) {
       if (first || onListScreen()) {
         route();
       }
+      // A rest started, moved or skipped on another device, or one running at launch.
+      tickClocks();
     },
     (error) => {
       console.error(error);
@@ -2504,11 +3150,12 @@ function onUserChanged(nextUser) {
       );
     }
   );
-  const settingsLoaded = ({ unit, setHint }) => {
+  const settingsLoaded = ({ unit, setHint, restSeconds }) => {
     const first = !settingsReady;
     settingsReady = true;
-    const changed = unit !== settings.unit || setHint !== settings.setHint; // false for the echo of a change made here
-    settings = { ...settings, unit, setHint };
+    // false for the echo of a change made here
+    const changed = unit !== settings.unit || setHint !== settings.setHint || restSeconds !== settings.restSeconds;
+    settings = { ...settings, unit, setHint, restSeconds };
     if (first || changed) {
       route();
     }
@@ -2518,7 +3165,11 @@ function onUserChanged(nextUser) {
     (saved) => {
       const first = !settingsReady;
       // Nothing saved yet means the defaults.
-      settingsLoaded({ unit: saved.unit === 'kg' ? 'kg' : 'lb', setHint: saved.setHint === 'max' ? 'max' : 'last' });
+      settingsLoaded({
+        unit: saved.unit === 'kg' ? 'kg' : 'lb',
+        setHint: saved.setHint === 'max' ? 'max' : 'last',
+        restSeconds: cleanRestSeconds(saved.restSeconds) ?? DEFAULT_SETTINGS.restSeconds,
+      });
       if (first && !saved.libraryBuilt) {
         buildLibrary(uid);
       }
