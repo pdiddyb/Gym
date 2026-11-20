@@ -63,10 +63,12 @@ body {
   font: 16px/1.4 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
+/* Stacking, lowest first: the pinned rest timer (1), the "Rest over" banner (2), the header
+   and its menus (3), the number pad (5). The duration popup is a <dialog>, above them all. */
 .bar {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -520,6 +522,342 @@ h1 + p {
   font-weight: 700;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
+}
+
+/* Focused from code only, when Skip goes away under the focus. */
+.workout-clock:focus {
+  outline: none;
+}
+
+/* While resting: "REST 02:29" with -15s, +15s and Skip, pinned under the header and as wide
+   as the screen, so the page scrolls cleanly underneath it. */
+.workout-clock.resting {
+  position: sticky;
+  top: var(--bar-height, 0px);
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 calc(-1 * max(16px, env(safe-area-inset-right))) 8px calc(-1 * max(16px, env(safe-area-inset-left)));
+  padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+/* A little smaller than the elapsed time, so the digits and the three buttons fit on one
+   line on a 360px wide phone. */
+.workout-clock.resting .timer {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 2rem;
+}
+
+.rest-word {
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+}
+
+.rest-controls {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.rest-controls .btn {
+  min-width: 52px;
+  padding: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "Rest timer 2m 30s ✎" and its switch, under an exercise's name */
+.rest-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.rest-row .switch {
+  margin-left: auto;
+}
+
+/* The length, with a pencil: opens the "Rest timer duration" popup. Also in Settings. */
+.rest-length {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.rest-length:hover {
+  background: var(--surface-2);
+}
+
+.rest-length .icon {
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+
+.rest-row.off .rest-length {
+  color: var(--muted);
+}
+
+/* On/off switch: a 44px tall button with the track and knob drawn inside it. */
+.switch {
+  position: relative;
+  flex: none;
+  width: 52px;
+  height: 44px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.switch::before {
+  content: '';
+  position: absolute;
+  top: 7px;
+  left: 0;
+  width: 52px;
+  height: 30px;
+  box-sizing: border-box;
+  background: var(--surface-2);
+  border: 1px solid var(--control);
+  border-radius: 999px;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.switch-knob {
+  position: absolute;
+  top: 11px;
+  left: 4px;
+  width: 22px;
+  height: 22px;
+  background: var(--muted);
+  border-radius: 50%;
+  transition: transform 0.15s, background-color 0.15s;
+}
+
+.switch[aria-checked='true']::before {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch[aria-checked='true'] .switch-knob {
+  transform: translateX(22px);
+  background: var(--accent-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .switch::before,
+  .switch-knob {
+    transition: none;
+  }
+}
+
+.rest-settings p {
+  margin: 8px 0 0;
+}
+
+/* "Rest over: next set of Bench press", just under the header on any screen */
+#rest-banner {
+  position: fixed;
+  top: calc(var(--bar-height, 68px) + 8px);
+  left: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(528px, calc(100% - 32px));
+  padding: 6px 6px 6px 16px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+  font-weight: 700;
+  transform: translateX(-50%);
+  animation: banner-in 0.2s ease-out;
+}
+
+#rest-banner[hidden] {
+  display: none;
+}
+
+#rest-banner span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+#rest-banner .icon-btn {
+  color: var(--accent-text);
+}
+
+#rest-banner .icon-btn:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+#rest-banner .icon-btn:focus-visible {
+  outline-color: var(--accent-text);
+}
+
+@keyframes banner-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #rest-banner {
+    animation: none;
+  }
+}
+
+/* "Rest timer duration" popup with minute and second wheels */
+.picker {
+  width: min(360px, calc(100vw - 32px));
+  padding: 0;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--control);
+  border-radius: 16px;
+}
+
+.picker::backdrop {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+/* The page behind the popup stays still. */
+body:has(.picker[open]) {
+  overflow: hidden;
+}
+
+.picker form {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.picker-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 1.15rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.picker-subtitle {
+  margin: -12px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.picker-hint {
+  margin: -8px 0 0;
+  text-align: center;
+}
+
+.picker-hint:empty {
+  display: none;
+}
+
+/* Five rows show; the middle one is the choice, on a lighter band. */
+.wheels {
+  --wheel-row: 40px;
+  position: relative;
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  isolation: isolate;
+}
+
+.wheels::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  z-index: -1;
+  height: var(--wheel-row);
+  background: var(--surface-2);
+  border-radius: 8px;
+  transform: translateY(-50%);
+}
+
+.wheel-column {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wheel {
+  width: 64px;
+  height: calc(var(--wheel-row) * 5);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+  border-radius: 8px;
+  -webkit-mask-image: linear-gradient(transparent, #000 30%, #000 70%, transparent);
+  mask-image: linear-gradient(transparent, #000 30%, #000 70%, transparent);
+}
+
+.wheel::-webkit-scrollbar {
+  display: none;
+}
+
+/* The fade would clip a ring drawn on the wheel itself, so the ring goes around its column. */
+.wheel:focus-visible {
+  outline: none;
+}
+
+.wheel-column {
+  border-radius: 8px;
+}
+
+.wheel-column:has(.wheel:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.wheel-spacer {
+  height: calc(var(--wheel-row) * 2);
+}
+
+.wheel-item {
+  height: var(--wheel-row);
+  line-height: var(--wheel-row);
+  color: var(--muted);
+  font-size: 1.4rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  scroll-snap-align: center;
+  cursor: pointer;
+}
+
+.wheel-item.selected {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.wheel-unit {
+  width: 2.2em;
+  color: var(--muted);
 }
 
 /* Workout completed */
@@ -988,8 +1326,10 @@ body.exercise-list-open main {
     grid-row: 4;
   }
 
-  /* There isn't room for a pinned header, the field and the pad; let the header scroll. */
-  body.pad-open .bar {
+  /* There isn't room for a pinned header, the field and the pad; let the header scroll,
+     and the rest timer with it. */
+  body.pad-open .bar,
+  body.pad-open .workout-clock.resting {
     position: static;
   }
 }
