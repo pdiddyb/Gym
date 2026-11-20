@@ -1927,11 +1927,16 @@ function statsWith(key, manual) {
   return found ? { last: found.last, max: found.max } : editedStats(entry);
 }
 
-// One stat in the editor: the weight, its unit and the reps of the Max or the Last set,
-// filled in with the set as it is now, in the current unit. `next` gives the field that
-// comes after this stat's reps; without it, the reps field's pad key saves.
+// One stat in the editor: the weight, the unit it was logged in and the reps of the Max or
+// the Last set, filled in with the set exactly as it was logged (its own number and unit,
+// which can differ from the unit the list shows it in). `next` gives the field that comes
+// after this stat's reps; without it, the reps field's pad key saves.
 function statFields(label, which, record, next) {
-  const before = { weight: record ? shownWeight(record) : '', unit: settings.unit, reps: record ? String(record.reps) : '' };
+  const before = {
+    weight: record ? String(record.weight) : '',
+    unit: record ? unitOf(record) : settings.unit,
+    reps: record ? String(record.reps) : '',
+  };
   let unit = before.unit;
 
   const weight = padInput(
@@ -1949,10 +1954,24 @@ function statFields(label, which, record, next) {
   const needReps = () => {
     reps.required = weight.value !== '';
   };
-  weight.addEventListener('input', needReps);
   needReps();
 
-  // lb / kg for this set only. It says which unit the number is in; it doesn't convert it.
+  // Once the unit has been switched: what the set will be saved as, in both units, for
+  // example "135 kg (≈ 297.6 lb)". Empty otherwise, and while there is no weight.
+  const result = h('p', { class: 'unit-result', 'aria-live': 'polite' });
+  const showResult = () => {
+    const value = Number(weight.value);
+    const other = UNITS.find((option) => option !== unit);
+    result.textContent =
+      unit !== before.unit && value > 0 ? `${value} ${unit} (≈ ${roundForDisplay(convertWeight(value, unit, other))} ${other})` : '';
+  };
+  weight.addEventListener('input', () => {
+    needReps();
+    showResult();
+  });
+
+  // "Logged in: lb / kg": the unit the number was logged in. Switching it keeps the number
+  // and changes only its unit, which fixes a set saved in the wrong unit.
   const unitButtons = UNITS.map((option) =>
     h(
       'button',
@@ -1963,6 +1982,7 @@ function statFields(label, which, record, next) {
         onclick: () => {
           unit = option;
           unitButtons.forEach((button) => button.setAttribute('aria-pressed', String(button.textContent === unit)));
+          showResult();
         },
       },
       option
@@ -1974,36 +1994,31 @@ function statFields(label, which, record, next) {
   const read = () => {
     const weightValue = weight.value.trim();
     const repsValue = reps.value.trim();
-    const sameWeight = weightValue === before.weight && unit === before.unit;
-    if (sameWeight && repsValue === before.reps) {
+    if (weightValue === before.weight && unit === before.unit && repsValue === before.reps) {
       return { unchanged: true };
     }
     if (!weightValue && !repsValue) {
       return { set: null };
     }
-    // A weight left as it was filled in keeps the stored value and unit exactly, rather
-    // than a rounded conversion of it.
-    const keep = sameWeight && record;
-    return {
-      set: {
-        weight: keep ? record.weight : Number(weightValue) || 0,
-        unit: keep ? unitOf(record) : unit,
-        reps: Math.max(1, Math.floor(Number(repsValue))),
-      },
-    };
+    return { set: { weight: Number(weightValue) || 0, unit, reps: Math.max(1, Math.floor(Number(repsValue))) } };
   };
 
+  // Only one editor is open at a time, so these ids are unique on the page.
+  const unitLabelId = `stat-${which}-unit`;
+  const unitHintId = `stat-${which}-unit-hint`;
   const element = h(
     'fieldset',
     { class: 'stat-fields' },
     h('legend', {}, label),
+    h('div', { class: 'stat-row' }, h('label', {}, 'Weight', weight), h('label', {}, 'Reps', reps)),
     h(
       'div',
-      { class: 'stat-row' },
-      h('label', {}, 'Weight', weight),
-      h('div', { class: 'unit-toggle', role: 'group', 'aria-label': `${label} weight unit` }, unitButtons),
-      h('label', {}, 'Reps', reps)
-    )
+      { class: 'unit-line' },
+      h('span', { id: unitLabelId }, 'Logged in:'),
+      h('div', { class: 'unit-toggle', role: 'group', 'aria-labelledby': unitLabelId, 'aria-describedby': unitHintId }, unitButtons)
+    ),
+    h('p', { class: 'muted unit-hint', id: unitHintId }, 'Changes the unit only, not the number. Use this to fix a set saved in the wrong unit.'),
+    result
   );
   return { element, first: weight, read };
 }

@@ -672,6 +672,32 @@ input[type='search'] {
   min-width: 0;
 }
 
+/* "Logged in: lb / kg" under the weight and reps, its hint, and once the unit has been
+   switched, the result in both units. */
+.unit-line {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.stat-fields .unit-hint {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+}
+
+.stat-fields .unit-result {
+  margin: 6px 0 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-fields .unit-result:empty {
+  margin: 0;
+}
+
 /* The heading is focused from code (after an exercise is removed); it needs no ring. */
 h1[tabindex='-1']:focus {
   outline: none;
